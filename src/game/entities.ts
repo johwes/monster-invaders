@@ -2,8 +2,9 @@
 // damage + scoring collision (specs 02/04/06, PROGRESS items 4-5). Gameplay
 // reads the normalized `Intent` and never checks raw keys. Breach-ends-run,
 // ward HP + blink invulnerability, and souls scoring all live here;
-// mana/cooldowns arrive with item 7; full incursion scaling with item 6;
-// demon lords with item 10.
+// mana/cooldowns arrive with item 7; demon lords with item 10.
+// Per-incursion scaling (composition via incursions.ts, drift/fire-rate
+// off CombatState.incursion) is wired.
 //
 // `archetype` stays a stub extension point with one default wizard: all
 // starting stats (move speed, cast interval, ward HP) are read through it.
@@ -11,8 +12,6 @@
 import {
   BOLT_RADIUS,
   DEMON_RADIUS,
-  FORMATION_BASE_FIRE_INTERVAL,
-  FORMATION_BASE_SPEED,
   FORMATION_COL_GAP,
   FORMATION_ROW_GAP,
   FORMATION_START_Y,
@@ -36,7 +35,10 @@ import {
   demonHpForKind,
   demonKindAt,
   demonSoulsForKind,
+  driftSpeedForIncursion,
+  fireIntervalForIncursion,
   formationLayout,
+  thinSpeedMultiplier,
 } from './incursions.ts';
 import { MANA_MAX } from './spells.ts';
 
@@ -106,6 +108,10 @@ export interface CombatState {
   /** Shared formation drift direction: +1 east, -1 west. */
   formationDir: 1 | -1;
   fireTimer: number;
+  /** Incursion this combat was built for — drives drift/fire-rate scaling. */
+  incursion: number;
+  /** Formation size at spawn — denominator for the thin speed-up. */
+  initialDemons: number;
   /**
    * True once the wizard has taken a hit this incursion. Reset by
    * `createCombat`; read at clear time for the no-hit bonus (spec 02).
@@ -146,7 +152,7 @@ export function createDemons(incursion: number): Demon[] {
   const demons: Demon[] = [];
   for (let row = 0; row < rows; row += 1) {
     for (let col = 0; col < cols; col += 1) {
-      const kind = demonKindAt(incursion, row, col);
+      const kind = demonKindAt(incursion, row, col, rows);
       demons.push({
         kind,
         x: startX + col * FORMATION_COL_GAP,
@@ -166,14 +172,17 @@ export function createCombat(
   incursion: number,
   archetype: Archetype = DEFAULT_ARCHETYPE,
 ): CombatState {
+  const demons = createDemons(incursion);
   return {
     wizard: createWizard(archetype),
-    demons: createDemons(incursion),
+    demons,
     wizardBolts: [],
     hellfire: [],
     pillars: createPillars(),
     formationDir: 1,
-    fireTimer: FORMATION_BASE_FIRE_INTERVAL,
+    fireTimer: fireIntervalForIncursion(incursion),
+    incursion,
+    initialDemons: demons.length,
     tookHit: false,
   };
 }
@@ -243,9 +252,13 @@ function updateWizard(
 /** Classic sidle: drift across the room, step south + reverse on edge hit. */
 function updateFormation(combat: CombatState, step: number): void {
   if (combat.demons.length === 0) return;
-  // Item 6 adds the per-incursion drift multiplier and thin-formation
-  // speed-up; item 4 moves at the unscaled base speed.
-  const dx = combat.formationDir * FORMATION_BASE_SPEED * step;
+  // Per-incursion drift multiplier plus the thin-formation speed-up
+  // (spec 02): a full late horde sidles well above base, and the last
+  // demons move up to 2x faster than their incursion's drift speed.
+  const speed =
+    driftSpeedForIncursion(combat.incursion) *
+    thinSpeedMultiplier(combat.demons.length, combat.initialDemons);
+  const dx = combat.formationDir * speed * step;
   let minX = Infinity;
   let maxX = -Infinity;
   for (const demon of combat.demons) {
@@ -264,11 +277,11 @@ function updateFormation(combat: CombatState, step: number): void {
   }
 }
 
-/** Demons spit hellfire south (spec 02); rate scaling arrives in item 6. */
+/** Demons spit hellfire south (spec 02); interval tightens per incursion. */
 function updateHellfireSpawns(combat: CombatState, step: number): void {
   combat.fireTimer -= step;
   if (combat.fireTimer > 0 || combat.demons.length === 0) return;
-  combat.fireTimer += FORMATION_BASE_FIRE_INTERVAL;
+  combat.fireTimer += fireIntervalForIncursion(combat.incursion);
   const shooter = combat.demons[Math.floor(Math.random() * combat.demons.length)];
   combat.hellfire.push({
     x: shooter.x,
