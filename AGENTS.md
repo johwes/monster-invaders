@@ -1,0 +1,10 @@
+# AGENTS.md — Wizard's Ward (top-down wizard-vs-demons arcade)
+
+> Greenfield: specs only, no code/tooling yet. Source of truth: `specs/README.md` + `specs/02-06`. On conflict, the numbered spec file wins over the README.
+
+- Planned stack: TypeScript + Vite, plain Canvas 2D, static hosting, no backend, no engine, no binary assets (sprites/synth-SFX drawn/coded). Check for root manifests before adding tooling; keep single-package layout.
+- Naming: specs say `incursion/demon/boon/spell` (legacy `wave/invader/powerup` also appears). Pick one set at scaffolding and use it consistently; suggested layout + `spells.ts` template in `specs/06-tech-architecture.md`.
+- Hard rules from specs (don't simplify away): fixed-timestep 60 Hz loop, clamp delta, pause fully freezes demons/projectiles/mana/cooldowns/particles; logic in 960×540 reference units, render scales with DPR capped at 2; gameplay reads normalized `intent { moveX, moveY, casting, beam, spell1 }` — no raw key checks in entities; spell cost/cooldown/regen go through `costMult`/`cdMult`/`regenMult`; caps ~40 wizard projectiles / 200 particles / 2 familiars / 4 zones; storage keys `ww.highScore`, `ww.muted` with try/catch; `touch-action: none`, viewport `maximum-scale=1`.
+- Gameplay invariants: 1 spell slot (architect for 2), Hold is auto-north zone (roots normals, 50% slows lords, re-cast refreshes), draft is pause + pick-1-of-3 with stacking caps + Lesser-Heal fallback, lord every 5th incursion, breach of ward line ends run, `archetype` is a stub extension point (one default wizard).
+- Commands: none verified yet. When scaffolding, record exact `npm install / dev / build / preview` here. No test framework in v1 — verification is the manual checklist in `specs/06-tech-architecture.md` (run it, plus one real-device touch check).
+- Prefer editing existing files; do not create docs unless requested. Trust executable config over prose on conflict.
