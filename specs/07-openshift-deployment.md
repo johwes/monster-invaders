@@ -45,6 +45,9 @@ Prerequisite: the cluster must pull `registry.redhat.io` (global pull
 secret with Red Hat entitlement — verified present on the dev cluster
 since `oc image info` resolves both refs). If pulls fail, fix the pull
 secret; do not swap in non-hardened bases without updating this spec.
+The source repo must be world-cloneable (public) for git-triggered
+builds; a private repo needs a source secret wired via
+`spec.source.sourceSecret` instead.
 
 ## Dockerfile (multi-stage, repo root)
 
