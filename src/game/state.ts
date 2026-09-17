@@ -4,6 +4,9 @@
 // loop freezes every update while `isUpdateFrozen()` is true, so demons,
 // projectiles, mana, cooldowns, and particles all stop together.
 
+import { createCombat, updateCombat, type CombatState } from './entities.ts';
+import type { Intent } from './input.ts';
+
 export type Screen = 'menu' | 'incursion' | 'draft' | 'gameover';
 
 export type PauseReason = 'manual' | 'blur';
@@ -20,6 +23,8 @@ export interface RunState {
   incursion: number;
   /** Sim seconds accrued only while the sim runs — proves the freeze. */
   runTime: number;
+  /** Room combat (wizard, demons, projectiles, pillars). Null off-run. */
+  combat: CombatState | null;
 }
 
 export function createInitialState(): RunState {
@@ -30,6 +35,7 @@ export function createInitialState(): RunState {
     score: 0,
     incursion: 0,
     runTime: 0,
+    combat: null,
   };
 }
 
@@ -54,6 +60,7 @@ export function startRun(state: RunState): void {
   state.score = 0;
   state.incursion = 1;
   state.runTime = 0;
+  state.combat = createCombat(1);
 }
 
 /** Clearing an incursion parks the run on the draft screen (still frozen). */
@@ -67,6 +74,7 @@ export function chooseDraftCard(state: RunState, _index: number): void {
   if (state.screen !== 'draft') return;
   state.screen = 'incursion';
   state.incursion += 1;
+  state.combat = createCombat(state.incursion);
 }
 
 /** Death or ward-line breach ends the run (spec 02). */
@@ -109,10 +117,15 @@ export function quitToMenu(state: RunState): void {
   state.score = 0;
   state.incursion = 0;
   state.runTime = 0;
+  state.combat = null;
 }
 
-/** Advance sim clocks; no-op unless the sim is running (freeze-safe). */
-export function advanceSim(state: RunState, step: number): void {
-  if (!isSimRunning(state)) return;
+/**
+ * Advance sim clocks + room combat; no-op unless the sim is running
+ * (freeze-safe: pause/menu/draft/gameover tick nothing).
+ */
+export function advanceSim(state: RunState, step: number, intent: Intent): void {
+  if (!isSimRunning(state) || state.combat === null) return;
   state.runTime += step;
+  updateCombat(state.combat, intent, step);
 }

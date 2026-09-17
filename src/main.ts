@@ -75,16 +75,16 @@ function boot(): void {
 
   const loop = createLoop({
     update(step): void {
-      // Item 3 advances input smoothing on the fixed clock; demons/
-      // projectiles/mana/cooldowns/particles arrive in later items and tick
-      // here, so the isPaused freeze below covers them all without rework.
+      // Item 3 advances input smoothing on the fixed clock; item 4 ticks
+      // room combat (wizard, formation, projectiles, pillars) through the
+      // same gate, so the isPaused freeze below covers them all.
       input.update(step);
       if (input.consumeSpellPress()) {
         // No spell effect until item 7 — flash the button to prove the
         // Q/E/tap edge reached the game through the normalized intent.
         spellFlashUntil = performance.now() + 160;
       }
-      advanceSim(state, step);
+      advanceSim(state, step, input.getIntent());
     },
     render(): void {
       // Movement capture only mid-incursion while unpaused; buttons and
