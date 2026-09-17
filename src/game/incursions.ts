@@ -1,6 +1,6 @@
 // Incursion (formation / demon-lord) helpers (spec 02).
 // Normal-incursion composition + difficulty scaling live here; demon-lord
-// spawn logic arrives with PROGRESS item 10.
+// spawn numbers (HP/souls/attack cadence) locked in PROGRESS item 10.
 
 import type { DemonKind } from './entities.ts';
 import {
@@ -115,6 +115,11 @@ export function noHitBonusForIncursion(incursion: number): number {
   return Math.floor(clearBonusForIncursion(incursion) / 2);
 }
 
+/** Demon lord tier for an incursion: `floor(incursion / 5)` (min 1). */
+export function lordTierForIncursion(incursion: number): number {
+  return Math.max(1, Math.floor(Math.max(1, Math.floor(incursion)) / 5));
+}
+
 /** Demon lord HP: `60 + 25 x tier`, where tier = incursion / 5 (spec 02). */
 export function lordHpForTier(tier: number): number {
   return 60 + 25 * tier;
@@ -123,4 +128,14 @@ export function lordHpForTier(tier: number): number {
 /** Demon lord souls: `500 x tier` (spec 02). */
 export function lordSoulsForTier(tier: number): number {
   return 500 * tier;
+}
+
+/**
+ * Lord attack cadence (item 10 tuning): `max(1.1s, 2.2s - 0.15s * tier)`.
+ * The three patterns (spread / aimed burst / summon) cycle in rotation, so
+ * each individual pattern recurs every 3x this interval. Floors at 1.1s
+ * from tier 8 on (incursion 40).
+ */
+export function lordAttackIntervalForTier(tier: number): number {
+  return Math.max(1.1, 2.2 - 0.15 * Math.max(1, Math.floor(tier)));
 }
