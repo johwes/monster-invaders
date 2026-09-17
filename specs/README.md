@@ -37,6 +37,7 @@ is the local high score.
 | [04-controls-input.md](./04-controls-input.md) | 8-way keyboard, joystick + drag touch schemes, spell key/button, tactical pause |
 | [05-presentation-audio.md](./05-presentation-audio.md) | Screens, HUD (mana/cooldowns), Hold visuals, SFX, high-score UI |
 | [06-tech-architecture.md](./06-tech-architecture.md) | Vite+TS layout (`spells.ts`), game loop, state, storage keys, acceptance checklist |
+| [07-openshift-deployment.md](./07-openshift-deployment.md) | Hardened multi-stage build, nginx serve, on-cluster BuildConfig + Deployment/Service/Route |
 
 Read in order 02 → 06. Each file is normative for its area; this README
 is the overview. On conflict, the numbered file wins over this README.
