@@ -264,16 +264,20 @@ function paintRoom(ctx: CanvasRenderingContext2D, state: RunState): void {
     ctx.fill();
   }
 
-  // Wizard: arcane-violet robe + brim.
+  // Wizard: arcane-violet robe + brim. Blinks while hit-invulnerable
+  // (spec 02: 1s blink) — ~10 Hz toggle off the frozen invuln timer.
   const wizard = combat.wizard;
-  ctx.fillStyle = '#6f5fd0';
-  ctx.beginPath();
-  ctx.arc(wizard.x, wizard.y, WIZARD_RADIUS, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#e8e0d0';
-  ctx.beginPath();
-  ctx.arc(wizard.x, wizard.y - 4, 5, 0, Math.PI * 2);
-  ctx.fill();
+  const blinking = wizard.invulnTimer > 0 && Math.floor(wizard.invulnTimer * 10) % 2 === 0;
+  if (!blinking) {
+    ctx.fillStyle = '#6f5fd0';
+    ctx.beginPath();
+    ctx.arc(wizard.x, wizard.y, WIZARD_RADIUS, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#e8e0d0';
+    ctx.beginPath();
+    ctx.arc(wizard.x, wizard.y - 4, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
 }
 
 function paintRunShell(ctx: CanvasRenderingContext2D, state: RunState, ui: ScaffoldUi): void {
@@ -284,14 +288,14 @@ function paintRunShell(ctx: CanvasRenderingContext2D, state: RunState, ui: Scaff
   ctx.fillStyle = '#8f86a3';
   ctx.font = '16px sans-serif';
   ctx.fillText(
-    `Incursion ${state.incursion} — t=${state.runTime.toFixed(1)}s, souls ${state.score}`,
+    `Incursion ${state.incursion} — t=${state.runTime.toFixed(1)}s, souls ${state.score} (best ${Math.max(state.highScore, state.score)})`,
     REFERENCE_WIDTH / 2,
     16,
   );
   ctx.fillStyle = '#5f5878';
   ctx.font = '13px sans-serif';
   ctx.fillText(
-    'C: clear → draft (placeholder) · X: breach → gameover · P/Esc: pause',
+    'Banish every demon before the ward line falls · P/Esc: pause',
     REFERENCE_WIDTH / 2,
     REFERENCE_HEIGHT - 12,
   );
@@ -347,10 +351,12 @@ function paintDraftShell(ctx: CanvasRenderingContext2D, state: RunState): void {
 }
 
 function paintGameoverShell(ctx: CanvasRenderingContext2D, state: RunState): void {
+  const best = Math.max(state.highScore, state.score);
+  const badge = state.newBest ? ' — NEW BEST' : '';
   paintTitle(
     ctx,
     'The ward falls…',
-    `gameover — souls ${state.score}, reached incursion ${state.incursion}`,
+    `gameover — souls ${state.score}, best ${best}${badge}, reached incursion ${state.incursion}`,
     'Enter: restart · Esc: menu',
   );
   const labels: Record<string, string> = {

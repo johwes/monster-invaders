@@ -1,14 +1,16 @@
-// Combatants: room movement, auto-cast, formation, projectiles, pillars
-// (specs 02/04/06, PROGRESS item 4). Gameplay reads the normalized `Intent`
-// and never checks raw keys. Damage/scoring collision arrives with item 5;
-// breach-ends-run with item 5; mana/cooldowns with item 7; full incursion
-// scaling with item 6; demon lords with item 10.
+// Combatants: room movement, auto-cast, formation, projectiles, pillars,
+// damage + scoring collision (specs 02/04/06, PROGRESS items 4-5). Gameplay
+// reads the normalized `Intent` and never checks raw keys. Breach-ends-run,
+// ward HP + blink invulnerability, and souls scoring all live here;
+// mana/cooldowns arrive with item 7; full incursion scaling with item 6;
+// demon lords with item 10.
 //
 // `archetype` stays a stub extension point with one default wizard: all
 // starting stats (move speed, cast interval, ward HP) are read through it.
 
 import {
   BOLT_RADIUS,
+  DEMON_RADIUS,
   FORMATION_BASE_FIRE_INTERVAL,
   FORMATION_BASE_SPEED,
   FORMATION_COL_GAP,
@@ -22,13 +24,20 @@ import {
   ROOM_LEFT,
   ROOM_RIGHT,
   ROOM_TOP,
+  WARD_LINE_Y,
   WIZARD_BOLT_SPEED,
+  WIZARD_INVULN_DURATION,
   WIZARD_PROJECTILE_CAP,
   WIZARD_RADIUS,
   WIZARD_START,
 } from './constants.ts';
 import type { Intent } from './input.ts';
-import { demonHpForKind, demonKindAt, formationLayout } from './incursions.ts';
+import {
+  demonHpForKind,
+  demonKindAt,
+  demonSoulsForKind,
+  formationLayout,
+} from './incursions.ts';
 import { MANA_MAX } from './spells.ts';
 
 export type DemonKind = 'imp' | 'cackler' | 'brute' | 'bat';
@@ -56,6 +65,11 @@ export interface Wizard {
   mana: number;
   /** Countdown to the next auto-cast north (spec 04: always on). */
   castTimer: number;
+  /**
+   * Seconds of hit invulnerability left (spec 02: 1s + blink). Ticks down
+   * on the fixed clock, so tactical pause freezes it with everything else.
+   */
+  invulnTimer: number;
 }
 
 export interface Demon {
@@ -92,6 +106,24 @@ export interface CombatState {
   /** Shared formation drift direction: +1 east, -1 west. */
   formationDir: 1 | -1;
   fireTimer: number;
+  /**
+   * True once the wizard has taken a hit this incursion. Reset by
+   * `createCombat`; read at clear time for the no-hit bonus (spec 02).
+   */
+  tookHit: boolean;
+}
+
+/**
+ * Fixed-step outcome for the run state machine (spec 02): souls banished
+ * this step, plus terminal flags. `breached` (any demon at/past the ward
+ * line) and `wizardDead` (ward HP depleted) both end the run; `cleared`
+ * (formation empty, not breached) advances to the draft.
+ */
+export interface CombatResult {
+  souls: number;
+  breached: boolean;
+  cleared: boolean;
+  wizardDead: boolean;
 }
 
 export function createWizard(archetype: Archetype = DEFAULT_ARCHETYPE): Wizard {
@@ -102,6 +134,7 @@ export function createWizard(archetype: Archetype = DEFAULT_ARCHETYPE): Wizard {
     maxHp: archetype.wardHp,
     mana: MANA_MAX,
     castTimer: 0,
+    invulnTimer: 0,
   };
 }
 
@@ -141,6 +174,7 @@ export function createCombat(
     pillars: createPillars(),
     formationDir: 1,
     fireTimer: FORMATION_BASE_FIRE_INTERVAL,
+    tookHit: false,
   };
 }
 
@@ -253,8 +287,9 @@ function boltHitsPillar(bolt: Bolt, pillar: Pillar): boolean {
 
 /**
  * Move projectiles; pillars block both sides (spec 02) — a blocked bolt is
- * consumed and chips 1 HP-cell off the pillar. Bolt-vs-demon / hellfire-
- * vs-wizard hits and off-south-line breach are item 5.
+ * consumed and chips 1 HP-cell off the pillar. Bolt-vs-demon, hellfire-
+ * vs-wizard, and contact hits resolve in `resolveHits` below so pillar
+ * cover is checked first; the ward-line breach check is `checkBreach`.
  */
 function updateBolts(combat: CombatState, step: number): void {
   for (const bolt of [...combat.wizardBolts, ...combat.hellfire]) {
@@ -274,18 +309,125 @@ function updateBolts(combat: CombatState, step: number): void {
   combat.hellfire = combat.hellfire.filter((bolt) => !blocks(bolt));
 }
 
+function circlesHit(
+  ax: number,
+  ay: number,
+  ar: number,
+  bx: number,
+  by: number,
+  br: number,
+): boolean {
+  const dx = ax - bx;
+  const dy = ay - by;
+  const r = ar + br;
+  return dx * dx + dy * dy <= r * r;
+}
+
 /**
- * Advance room combat one fixed step. No-op without demons is fine (lord
- * fights replace the list in item 10); damage/scoring lands in item 5.
+ * Deal 1 ward-HP hit to the wizard unless invulnerable or already dead.
+ * Sets the 1s blink timer and the incursion's took-hit flag (spec 02).
+ * Returns true if the hit landed.
+ */
+function damageWizard(combat: CombatState): boolean {
+  const { wizard } = combat;
+  if (wizard.hp <= 0 || wizard.invulnTimer > 0) return false;
+  wizard.hp -= 1;
+  wizard.invulnTimer = WIZARD_INVULN_DURATION;
+  combat.tookHit = true;
+  return true;
+}
+
+/**
+ * Circle collision, both directions (spec 06: circle/AABB is fine).
+ * Wizard bolts (1 damage) banish demons for souls; hellfire and demon
+ * contact deal 1 ward damage through `damageWizard`. Returns souls gained.
+ */
+function resolveHits(combat: CombatState): number {
+  let souls = 0;
+
+  const survivingBolts: Bolt[] = [];
+  for (const bolt of combat.wizardBolts) {
+    let hitIndex = -1;
+    for (let i = 0; i < combat.demons.length; i += 1) {
+      const demon = combat.demons[i];
+      if (circlesHit(bolt.x, bolt.y, BOLT_RADIUS, demon.x, demon.y, DEMON_RADIUS)) {
+        hitIndex = i;
+        break;
+      }
+    }
+    if (hitIndex === -1) {
+      survivingBolts.push(bolt);
+      continue;
+    }
+    const demon = combat.demons[hitIndex];
+    demon.hp -= 1;
+    if (demon.hp <= 0) {
+      combat.demons.splice(hitIndex, 1);
+      souls += demonSoulsForKind(demon.kind);
+    }
+  }
+  combat.wizardBolts = survivingBolts;
+
+  const survivingHellfire: Bolt[] = [];
+  for (const bolt of combat.hellfire) {
+    if (
+      circlesHit(bolt.x, bolt.y, BOLT_RADIUS, combat.wizard.x, combat.wizard.y, WIZARD_RADIUS)
+    ) {
+      damageWizard(combat);
+      continue;
+    }
+    survivingHellfire.push(bolt);
+  }
+  combat.hellfire = survivingHellfire;
+
+  // North roaming risks contact damage (spec 02): demon touch burns 1 ward
+  // HP through the same invulnerability gate. Demons survive the bump —
+  // the ward line behind them still ends the run.
+  for (const demon of combat.demons) {
+    if (
+      circlesHit(demon.x, demon.y, DEMON_RADIUS, combat.wizard.x, combat.wizard.y, WIZARD_RADIUS)
+    ) {
+      damageWizard(combat);
+      break;
+    }
+  }
+
+  return souls;
+}
+
+/**
+ * Breach-ends-run (spec 02): any demon center at/past the ward line ends
+ * the run immediately, even if the wizard is roaming north.
+ */
+function checkBreach(combat: CombatState): boolean {
+  for (const demon of combat.demons) {
+    if (demon.y >= WARD_LINE_Y) return true;
+  }
+  return false;
+}
+
+/**
+ * Advance room combat one fixed step. Returns the step's souls plus
+ * terminal flags; the run state machine (state.ts) turns them into
+ * score, clear/no-hit bonuses, and game over.
  */
 export function updateCombat(
   combat: CombatState,
   intent: Intent,
   step: number,
   archetype: Archetype = DEFAULT_ARCHETYPE,
-): void {
+): CombatResult {
+  if (combat.wizard.invulnTimer > 0) {
+    combat.wizard.invulnTimer = Math.max(0, combat.wizard.invulnTimer - step);
+  }
   updateWizard(combat, intent, step, archetype);
   updateFormation(combat, step);
   updateHellfireSpawns(combat, step);
   updateBolts(combat, step);
+  const souls = resolveHits(combat);
+  const breached = checkBreach(combat);
+  const wizardDead = combat.wizard.hp <= 0;
+  // A breached line is never a "clear", even if the last bolt lands first.
+  const cleared = !breached && !wizardDead && combat.demons.length === 0;
+  return { souls, breached, cleared, wizardDead };
 }
