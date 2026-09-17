@@ -17,3 +17,4 @@ locked behavior or a tuning decision — progress logging goes here, not in spec
 - [x] 10. Demon lord: every 5th incursion, HP `60 + 25 × tier`, 2–3 attack patterns, HP bar, no pillars, 500 × tier souls, advances to draft on banish.
 - [x] 11. Presentation + audio: HUD (souls, incursion, pips, mana bar, cooldown sweep, boon icons), menu/draft/pause/gameover screens, juice (shake, flashes, banish bursts, banners; particles ≤ 200), synth SFX + `ww.muted`, audio-resume on gesture.
 - [x] 12. Acceptance pass: full manual checklist in `specs/06-tech-architecture.md` + one real-device touch check (both touch schemes).
+- [x] 13. OpenShift: `specs/07-openshift-deployment.md` + hardened multi-stage `Dockerfile`, on-cluster build green, default Route + edge TLS serving the game.

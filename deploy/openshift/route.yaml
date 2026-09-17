@@ -1,0 +1,15 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: wizards-ward
+  labels:
+    app: wizards-ward
+spec:
+  to:
+    kind: Service
+    name: wizards-ward
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

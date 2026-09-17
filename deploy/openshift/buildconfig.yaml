@@ -1,0 +1,31 @@
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: wizards-ward
+  labels:
+    app: wizards-ward
+spec:
+  source:
+    type: Git
+    git:
+      uri: https://github.com/johwes/monster-invaders.git
+      ref: main
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: wizards-ward:latest
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  triggers:
+    - type: ConfigChange
+    - type: ImageChange
+      imageChange: {}
