@@ -4,6 +4,7 @@
 // overlay) so transitions and the freeze are verifiable before real art lands.
 
 import { REFERENCE_WIDTH, REFERENCE_HEIGHT } from './constants.ts';
+import type { JoystickVisual, TouchScheme } from './input.ts';
 import type { RunState } from './state.ts';
 
 export interface ButtonRect {
@@ -12,6 +13,14 @@ export interface ButtonRect {
   y: number;
   w: number;
   h: number;
+}
+
+/** Extra UI state the scaffold shells need (touch scheme, mute, spell cue). */
+export interface ScaffoldUi {
+  touchScheme: TouchScheme;
+  muted: boolean;
+  /** Highlight the spell button briefly after a spell press. */
+  spellFlash: boolean;
 }
 
 /** Pause button: always visible mid-incursion, >=48px (spec 04). */
@@ -23,7 +32,39 @@ export const PAUSE_BUTTON: ButtonRect = {
   h: 48,
 };
 
-const MENU_BEGIN: ButtonRect = { id: 'begin', x: 380, y: 340, w: 200, h: 56 };
+/**
+ * Spell button: dedicated on-screen button, >=56px on the right side
+ * (spec 04). Tap casts the equipped spell; hold channels Sunbeam when it
+ * is equipped instead. Mana-cost label + cooldown sweep arrive with items
+ * 7/11; the shell shows the wiring with a press flash.
+ */
+export const SPELL_BUTTON: ButtonRect = {
+  id: 'spell',
+  x: REFERENCE_WIDTH - 88,
+  y: REFERENCE_HEIGHT - 104,
+  w: 64,
+  h: 64,
+};
+
+const MENU_BEGIN: ButtonRect = { id: 'begin', x: 380, y: 322, w: 200, h: 52 };
+
+/** Touch-scheme toggle (menu + pause overlay, spec 04). */
+const MENU_SCHEME_BUTTON: ButtonRect = {
+  id: 'touch-scheme',
+  x: 380,
+  y: 382,
+  w: 200,
+  h: 44,
+};
+
+/** Mute toggle on the menu (spec 05). */
+const MENU_MUTE_BUTTON: ButtonRect = {
+  id: 'mute-toggle',
+  x: 380,
+  y: 434,
+  w: 200,
+  h: 44,
+};
 
 const DRAFT_CARDS: ButtonRect[] = [
   { id: 'draft-0', x: 230, y: 180, w: 500, h: 64 },
@@ -37,6 +78,15 @@ const PAUSE_OVERLAY_BUTTONS: ButtonRect[] = [
   { id: 'quit-menu', x: 380, y: 374, w: 200, h: 52 },
 ];
 
+/** Touch-scheme toggle inside the pause overlay (spec 04). */
+const PAUSE_SCHEME_BUTTON: ButtonRect = {
+  id: 'touch-scheme',
+  x: 380,
+  y: 436,
+  w: 200,
+  h: 44,
+};
+
 const GAMEOVER_BUTTONS: ButtonRect[] = [
   { id: 'restart', x: 330, y: 340, w: 140, h: 52 },
   { id: 'quit-menu', x: 490, y: 340, w: 140, h: 52 },
@@ -46,10 +96,10 @@ const GAMEOVER_BUTTONS: ButtonRect[] = [
 export function getButtonsForState(state: RunState): ButtonRect[] {
   switch (state.screen) {
     case 'menu':
-      return [MENU_BEGIN];
+      return [MENU_BEGIN, MENU_SCHEME_BUTTON, MENU_MUTE_BUTTON];
     case 'incursion':
-      if (state.paused) return [...PAUSE_OVERLAY_BUTTONS];
-      return [PAUSE_BUTTON];
+      if (state.paused) return [...PAUSE_OVERLAY_BUTTONS, PAUSE_SCHEME_BUTTON];
+      return [PAUSE_BUTTON, SPELL_BUTTON];
     case 'draft':
       return [...DRAFT_CARDS];
     case 'gameover':
@@ -110,7 +160,7 @@ function paintButton(ctx: CanvasRenderingContext2D, button: ButtonRect, label: s
   ctx.fillText(label, button.x + button.w / 2, button.y + button.h / 2);
 }
 
-function paintMenuShell(ctx: CanvasRenderingContext2D): void {
+function paintMenuShell(ctx: CanvasRenderingContext2D, ui: ScaffoldUi): void {
   paintTitle(
     ctx,
     "Wizard's Ward",
@@ -118,9 +168,15 @@ function paintMenuShell(ctx: CanvasRenderingContext2D): void {
     'Enter / Space / Begin: start incursion 1',
   );
   paintButton(ctx, MENU_BEGIN, 'Begin');
+  paintButton(
+    ctx,
+    MENU_SCHEME_BUTTON,
+    `Touch: ${ui.touchScheme === 'joystick' ? 'Joystick' : 'Drag'}`,
+  );
+  paintButton(ctx, MENU_MUTE_BUTTON, `Sound: ${ui.muted ? 'Off' : 'On'} (M)`);
 }
 
-function paintRunShell(ctx: CanvasRenderingContext2D, state: RunState): void {
+function paintRunShell(ctx: CanvasRenderingContext2D, state: RunState, ui: ScaffoldUi): void {
   // Empty-room outline only: real floor, portal, pillars, and ward line
   // arrive with items 4/11. Geometry here is a placeholder frame.
   ctx.strokeStyle = '#3a3348';
@@ -145,6 +201,14 @@ function paintRunShell(ctx: CanvasRenderingContext2D, state: RunState): void {
   // Pause button (always visible mid-incursion).
   paintButton(ctx, PAUSE_BUTTON, 'II');
 
+  // Spell button (tap = cast, hold = channel). Real mana-cost/cooldown
+  // rendering arrives with items 7/11; the flash proves the input edge.
+  if (ui.spellFlash) {
+    ctx.fillStyle = '#6f5fd0';
+    ctx.fillRect(SPELL_BUTTON.x, SPELL_BUTTON.y, SPELL_BUTTON.w, SPELL_BUTTON.h);
+  }
+  paintButton(ctx, SPELL_BUTTON, 'Hold');
+
   if (state.paused) {
     ctx.fillStyle = 'rgba(10, 8, 16, 0.72)';
     ctx.fillRect(0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
@@ -162,6 +226,11 @@ function paintRunShell(ctx: CanvasRenderingContext2D, state: RunState): void {
     for (const button of PAUSE_OVERLAY_BUTTONS) {
       paintButton(ctx, button, labels[button.id] ?? button.id);
     }
+    paintButton(
+      ctx,
+      PAUSE_SCHEME_BUTTON,
+      `Touch: ${ui.touchScheme === 'joystick' ? 'Joystick' : 'Drag'}`,
+    );
   }
 }
 
@@ -198,14 +267,15 @@ function paintGameoverShell(ctx: CanvasRenderingContext2D, state: RunState): voi
 export function drawScaffoldScreen(
   ctx: CanvasRenderingContext2D,
   state: RunState,
+  ui: ScaffoldUi,
 ): void {
   paintBackground(ctx);
   switch (state.screen) {
     case 'menu':
-      paintMenuShell(ctx);
+      paintMenuShell(ctx, ui);
       break;
     case 'incursion':
-      paintRunShell(ctx, state);
+      paintRunShell(ctx, state, ui);
       break;
     case 'draft':
       paintDraftShell(ctx, state);
@@ -214,4 +284,25 @@ export function drawScaffoldScreen(
       paintGameoverShell(ctx, state);
       break;
   }
+}
+
+/**
+ * Code-drawn floating joystick (spec 05): base + knob at the thumb-down
+ * point. Drawn only while a joystick drag is active; the idle fade arrives
+ * with the item-11 presentation pass.
+ */
+export function drawJoystickOverlay(
+  ctx: CanvasRenderingContext2D,
+  stick: JoystickVisual | null,
+): void {
+  if (stick === null) return;
+  ctx.strokeStyle = '#6f5fd0';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(stick.baseX, stick.baseY, 60, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = '#8f86a3';
+  ctx.beginPath();
+  ctx.arc(stick.knobX, stick.knobY, 22, 0, Math.PI * 2);
+  ctx.fill();
 }
