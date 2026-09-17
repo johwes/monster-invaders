@@ -15,7 +15,7 @@ import {
   type BuildLevels,
   type DraftOffer,
 } from './boons.ts';
-import { clearBonusForIncursion, noHitBonusForIncursion } from './incursions.ts';
+import { clearBonusForIncursion, isLordIncursion, noHitBonusForIncursion } from './incursions.ts';
 import { MANA_MAX } from './spells.ts';
 import type { Intent } from './input.ts';
 import { loadHighScore, saveHighScore } from './storage.ts';
@@ -53,7 +53,19 @@ export interface RunState {
   levels: BuildLevels;
   /** Live pick-1-of-3 offers while `screen === 'draft'`; empty elsewhere. */
   draftOffers: DraftOffer[];
+  /**
+   * Center-screen banner (spec 05 juice: incursion-clear + lord warnings).
+   * UI-layer wall-clock text: set at run transitions, fades in render once
+   * `now` passes `bannerUntil`. Never ticks the sim, so pause needs no
+   * special handling — the banner simply overlays whatever is live.
+   */
+  bannerText: string;
+  /** `performance.now()` ms when the banner finishes fading; 0 = no banner. */
+  bannerUntil: number;
 }
+
+/** How long a banner stays fully visible before fading (ms). */
+export const BANNER_DURATION_MS = 2200;
 
 export function createInitialState(): RunState {
   return {
@@ -68,6 +80,8 @@ export function createInitialState(): RunState {
     combat: null,
     levels: {},
     draftOffers: [],
+    bannerText: '',
+    bannerUntil: 0,
   };
 }
 
@@ -84,6 +98,16 @@ export function isUpdateFrozen(state: RunState): boolean {
   return !isSimRunning(state);
 }
 
+/** True while a center-screen banner should draw (wall-clock fade). */
+export function bannerVisible(state: RunState, now: number): boolean {
+  return state.bannerText !== '' && now < state.bannerUntil;
+}
+
+function showBanner(state: RunState, text: string): void {
+  state.bannerText = text;
+  state.bannerUntil = performance.now() + BANNER_DURATION_MS;
+}
+
 /** Menu/gameover -> incursion 1 with a fresh run. */
 export function startRun(state: RunState): void {
   state.screen = 'incursion';
@@ -97,6 +121,7 @@ export function startRun(state: RunState): void {
   state.draftOffers = [];
   state.combat = createCombat(1);
   applyBuildToCombat(state);
+  showBanner(state, 'Incursion 1 — banish every demon!');
 }
 
 /** Clearing an incursion parks the run on the draft screen (still frozen). */
@@ -104,6 +129,7 @@ export function completeIncursion(state: RunState): void {
   if (state.screen !== 'incursion' || state.paused) return;
   state.draftOffers = drawDraftOffers(state.levels);
   state.screen = 'draft';
+  showBanner(state, `Incursion ${state.incursion} clear!`);
 }
 
 /**
@@ -168,6 +194,12 @@ export function chooseDraftCard(state: RunState, index: number): void {
     state.combat.wizard.mana = carriedMana;
   }
   applyBuildToCombat(state);
+  showBanner(
+    state,
+    isLordIncursion(state.incursion)
+      ? `A demon lord approaches… (incursion ${state.incursion})`
+      : `Incursion ${state.incursion}`,
+  );
 }
 
 /** Death or ward-line breach ends the run (spec 02). Persists a new best. */
@@ -219,6 +251,8 @@ export function quitToMenu(state: RunState): void {
   state.combat = null;
   state.levels = {};
   state.draftOffers = [];
+  state.bannerText = '';
+  state.bannerUntil = 0;
 }
 
 /**
