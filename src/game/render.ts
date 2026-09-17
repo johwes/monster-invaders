@@ -89,9 +89,9 @@ const MENU_MUTE_BUTTON: ButtonRect = {
 };
 
 const DRAFT_CARDS: ButtonRect[] = [
-  { id: 'draft-0', x: 230, y: 180, w: 500, h: 64 },
-  { id: 'draft-1', x: 230, y: 256, w: 500, h: 64 },
-  { id: 'draft-2', x: 230, y: 332, w: 500, h: 64 },
+  { id: 'draft-0', x: 230, y: 168, w: 500, h: 84 },
+  { id: 'draft-1', x: 230, y: 264, w: 500, h: 84 },
+  { id: 'draft-2', x: 230, y: 360, w: 500, h: 84 },
 ];
 
 const PAUSE_OVERLAY_BUTTONS: ButtonRect[] = [
@@ -443,11 +443,39 @@ function paintDraftShell(ctx: CanvasRenderingContext2D, state: RunState): void {
   paintTitle(
     ctx,
     `Incursion ${state.incursion} clear`,
-    'draft — pick 1 of 3 (placeholder cards, real pool in item 8)',
+    'draft — pick 1 of 3 (no skip, no reroll)',
     '1 / 2 / 3 or tap a card → next incursion',
   );
-  DRAFT_CARDS.forEach((card, index) => {
-    paintButton(ctx, card, `Card ${index + 1} (${index + 1})`);
+  state.draftOffers.forEach((offer, index) => {
+    const card = DRAFT_CARDS[index];
+    if (card === undefined) return;
+    // Card base + kind-colored border (violet spells, bone boons).
+    ctx.fillStyle = '#2a2438';
+    ctx.fillRect(card.x, card.y, card.w, card.h);
+    ctx.strokeStyle = offer.kind === 'spell' ? '#9d8fff' : '#6f5fd0';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(card.x, card.y, card.w, card.h);
+
+    const kindLabel = offer.kind === 'spell' ? 'Spell' : 'Boon';
+    const pips =
+      offer.cap > 0
+        ? ` ${'●'.repeat(offer.nextLevel)}${'○'.repeat(Math.max(0, offer.cap - offer.nextLevel))}`
+        : '';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = '#e8e0d0';
+    ctx.font = '20px sans-serif';
+    ctx.fillText(
+      `${index + 1}. [${kindLabel}] ${offer.name}${pips}`,
+      card.x + 16,
+      card.y + 30,
+    );
+    ctx.fillStyle = '#8f86a3';
+    ctx.font = '14px sans-serif';
+    ctx.fillText(offer.effect, card.x + 16, card.y + 52);
+    ctx.fillStyle = '#4d7dd1';
+    ctx.font = '14px sans-serif';
+    ctx.fillText(offer.delta, card.x + 16, card.y + 70);
   });
 }
 

@@ -4,8 +4,19 @@
 // loop freezes every update while `isUpdateFrozen()` is true, so demons,
 // projectiles, mana, cooldowns, and particles all stop together.
 
-import { createCombat, updateCombat, type CombatState } from './entities.ts';
+import { createCombat, setHoldRank, updateCombat, type CombatState } from './entities.ts';
+import { DEFAULT_ARCHETYPE } from './entities.ts';
+import {
+  FALLBACK_HEAL_ID,
+  FALLBACK_SOULS_AMOUNT,
+  FALLBACK_SOULS_ID,
+  drawDraftOffers,
+  levelOf,
+  type BuildLevels,
+  type DraftOffer,
+} from './boons.ts';
 import { clearBonusForIncursion, noHitBonusForIncursion } from './incursions.ts';
+import { MANA_MAX } from './spells.ts';
 import type { Intent } from './input.ts';
 import { loadHighScore, saveHighScore } from './storage.ts';
 
@@ -31,6 +42,16 @@ export interface RunState {
   runTime: number;
   /** Room combat (wizard, demons, projectiles, pillars). Null off-run. */
   combat: CombatState | null;
+  /**
+   * Run build: stacks taken per draftable id (`ward`, …, `hold`). Item 8
+   * owns this persistence — fresh incursions rebuild combat through it so
+   * Hold ranks and Ward max HP survive the draft, while one-shot fallbacks
+   * (heal/souls) apply immediately and leave no stacks. Continuous boon
+   * behaviors (arcane/haste/skulls/sunbeam/familiar) read these in item 9.
+   */
+  levels: BuildLevels;
+  /** Live pick-1-of-3 offers while `screen === 'draft'`; empty elsewhere. */
+  draftOffers: DraftOffer[];
 }
 
 export function createInitialState(): RunState {
@@ -44,6 +65,8 @@ export function createInitialState(): RunState {
     incursion: 0,
     runTime: 0,
     combat: null,
+    levels: {},
+    draftOffers: [],
   };
 }
 
@@ -69,21 +92,73 @@ export function startRun(state: RunState): void {
   state.newBest = false;
   state.incursion = 1;
   state.runTime = 0;
+  state.levels = {};
+  state.draftOffers = [];
   state.combat = createCombat(1);
+  applyBuildToCombat(state);
 }
 
 /** Clearing an incursion parks the run on the draft screen (still frozen). */
 export function completeIncursion(state: RunState): void {
   if (state.screen !== 'incursion' || state.paused) return;
+  state.draftOffers = drawDraftOffers(state.levels);
   state.screen = 'draft';
 }
 
-/** Draft pick (0/1/2) advances to the next incursion. Full card logic lands in item 8. */
-export function chooseDraftCard(state: RunState, _index: number): void {
+/**
+ * Rebuild per-incursion combat through the run build: Hold rank is
+ * re-equipped, Ward stacks raise max HP, and the wizard's HP/mana carry
+ * over from the cleared incursion (draft is paused — no regen — so mana
+ * arrives as it was, clamped to max). Called after every draft pick and
+ * at run start; item 9 extends it with continuous boon stats.
+ */
+function applyBuildToCombat(state: RunState): void {
+  if (state.combat === null) return;
+  const combat = state.combat;
+  setHoldRank(combat, levelOf(state.levels, 'hold'));
+  const maxHp = DEFAULT_ARCHETYPE.wardHp + levelOf(state.levels, 'ward');
+  combat.wizard.maxHp = maxHp;
+  combat.wizard.hp = Math.min(maxHp, Math.max(0, combat.wizard.hp));
+  combat.wizard.mana = Math.min(MANA_MAX, Math.max(0, combat.wizard.mana));
+}
+
+/** Draft pick (0/1/2) applies its card, then advances to the next incursion. */
+export function chooseDraftCard(state: RunState, index: number): void {
   if (state.screen !== 'draft') return;
+  const offer = state.draftOffers[index];
+  if (offer === undefined) return;
+  const combat = state.combat;
+
+  if (offer.id === FALLBACK_HEAL_ID) {
+    // One-shot: heal 1 up to max (spec 03 fallback), carried to next combat.
+    if (combat !== null) {
+      combat.wizard.hp = Math.min(combat.wizard.maxHp, combat.wizard.hp + 1);
+    }
+  } else if (offer.id === FALLBACK_SOULS_ID) {
+    state.score += FALLBACK_SOULS_AMOUNT;
+  } else {
+    state.levels[offer.id] = levelOf(state.levels, offer.id) + 1;
+    if (offer.id === 'ward' && combat !== null) {
+      // Ward heals 1 on pickup (spec 03); max HP lands in applyBuild below.
+      combat.wizard.hp = Math.min(
+        DEFAULT_ARCHETYPE.wardHp + levelOf(state.levels, 'ward'),
+        combat.wizard.hp + 1,
+      );
+    }
+  }
+
+  // Carry HP/mana across the draft (no regen while paused), then rebuild.
+  const carriedHp = combat?.wizard.hp ?? DEFAULT_ARCHETYPE.wardHp;
+  const carriedMana = combat?.wizard.mana ?? MANA_MAX;
   state.screen = 'incursion';
   state.incursion += 1;
+  state.draftOffers = [];
   state.combat = createCombat(state.incursion);
+  if (state.combat !== null) {
+    state.combat.wizard.hp = carriedHp;
+    state.combat.wizard.mana = carriedMana;
+  }
+  applyBuildToCombat(state);
 }
 
 /** Death or ward-line breach ends the run (spec 02). Persists a new best. */
@@ -133,6 +208,8 @@ export function quitToMenu(state: RunState): void {
   state.incursion = 0;
   state.runTime = 0;
   state.combat = null;
+  state.levels = {};
+  state.draftOffers = [];
 }
 
 /**
