@@ -1,10 +1,15 @@
 // Draft pool (spec 03). Combined boon + spell pool, stacking caps, the
 // Lesser-Heal / souls fallback, and per-card delta previews (PROGRESS
 // item 8). Continuous boon behaviors (arcane intervals, haste speed,
-// skulls, sunbeam, familiars) land with item 9; this file only tracks what
-// the wizard has drafted and what the next pick would grant.
+// skulls, sunbeam, familiars) run in entities.ts (item 9); this file only
+// tracks what the wizard has drafted and what the next pick would grant.
 
 import { HOLD } from './spells.ts';
+import {
+  boltCountForArcane,
+  castIntervalForArcane,
+  DEFAULT_ARCHETYPE,
+} from './entities.ts';
 
 export interface BoonDef {
   id: string;
@@ -92,8 +97,8 @@ function nameForId(id: string): string {
 /**
  * One-line effect + delta preview for an id at its current stacks. Numbers
  * below restate spec-locked tuning only (spec 02 base stats, spec 03 Hold
- * ranks / skull intervals / sunbeam duty / haste % / familiar cadence);
- * Arcane Power stays qualitative until item 9 locks its per-rank curve.
+ * ranks / skull intervals / sunbeam duty / haste % / familiar cadence, item
+ * 9 Arcane per-rank curve over the archetype base).
  */
 export function effectForId(id: string, currentLevel: number): { effect: string; delta: string } {
   switch (id) {
@@ -104,10 +109,14 @@ export function effectForId(id: string, currentLevel: number): { effect: string;
       };
     case 'arcane-power': {
       const next = currentLevel + 1;
-      const extra = next === 2 ? ' + double-bolt' : next === 4 ? ' + triple-spread' : '';
+      const curInterval = castIntervalForArcane(DEFAULT_ARCHETYPE.castInterval, currentLevel);
+      const nextInterval = castIntervalForArcane(DEFAULT_ARCHETYPE.castInterval, next);
+      const curBolts = boltCountForArcane(currentLevel);
+      const nextBolts = boltCountForArcane(next);
+      const extra = nextBolts > curBolts ? (nextBolts >= 3 ? ' + triple-spread' : ' + double-bolt') : '';
       return {
         effect: `Cast interval down (→~0.16s at L4).${extra}`,
-        delta: `Level ${currentLevel}→${next}${extra}`,
+        delta: `Cast ${curInterval.toFixed(2)}→${nextInterval.toFixed(2)}s, bolts ${curBolts}→${nextBolts}${extra}`,
       };
     }
     case 'haste': {

@@ -24,6 +24,23 @@ export const MAX_STEPS_PER_FRAME = 5;
 
 // Entity caps (spec 06).
 export const WIZARD_PROJECTILE_CAP = 40;
+// Boon tuning (spec 03, locked in PROGRESS item 9).
+/** Homing skull flight speed (px/s, reference units). */
+export const SKULL_SPEED = 360;
+export const SKULL_RADIUS = 6;
+/** Skull splash radius on impact (spec 03: small splash, 60px). */
+export const SKULL_SPLASH_RADIUS = 60;
+/** Skull lifetime before it fizzles (safety so stray skulls never leak). */
+export const SKULL_LIFE = 5;
+/** Familiar auto-cast interval (spec 03: 0.5s, 1 damage). */
+export const FAMILIAR_FIRE_INTERVAL = 0.5;
+/** Familiar flank offsets from the wizard; positions lerp (spec 03). */
+export const FAMILIAR_OFFSET_X = 36;
+export const FAMILIAR_OFFSET_Y = 4;
+export const FAMILIAR_LERP_RATE = 10;
+/** Sunbeam damage tick: 1 damage per tick to each demon in the beam
+ * (≈16.7 dps per target ≈ 6x the 0.35s base cast, spec 03). */
+export const BEAM_TICK_INTERVAL = 0.06;
 export const PARTICLE_CAP = 200;
 export const FAMILIAR_CAP = 2;
 export const ZONE_CAP = 4;

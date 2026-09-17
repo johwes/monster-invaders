@@ -5,7 +5,7 @@
 // projectiles, mana, cooldowns, and particles all stop together.
 
 import { createCombat, setHoldRank, updateCombat, type CombatState } from './entities.ts';
-import { DEFAULT_ARCHETYPE } from './entities.ts';
+import { applyBoonLevels, DEFAULT_ARCHETYPE } from './entities.ts';
 import {
   FALLBACK_HEAL_ID,
   FALLBACK_SOULS_AMOUNT,
@@ -47,7 +47,8 @@ export interface RunState {
    * owns this persistence — fresh incursions rebuild combat through it so
    * Hold ranks and Ward max HP survive the draft, while one-shot fallbacks
    * (heal/souls) apply immediately and leave no stacks. Continuous boon
-   * behaviors (arcane/haste/skulls/sunbeam/familiar) read these in item 9.
+   * stacks (arcane/haste/skulls/sunbeam/familiar) reach combat through
+   * `applyBoonLevels` in item 9.
    */
   levels: BuildLevels;
   /** Live pick-1-of-3 offers while `screen === 'draft'`; empty elsewhere. */
@@ -109,13 +110,21 @@ export function completeIncursion(state: RunState): void {
  * Rebuild per-incursion combat through the run build: Hold rank is
  * re-equipped, Ward stacks raise max HP, and the wizard's HP/mana carry
  * over from the cleared incursion (draft is paused — no regen — so mana
- * arrives as it was, clamped to max). Called after every draft pick and
- * at run start; item 9 extends it with continuous boon stats.
+ * arrives as it was, clamped to max). Continuous boon stacks (item 9:
+ * arcane/haste/skulls/sunbeam/familiar) layer on through `applyBoonLevels`.
+ * Called after every draft pick and at run start.
  */
 function applyBuildToCombat(state: RunState): void {
   if (state.combat === null) return;
   const combat = state.combat;
   setHoldRank(combat, levelOf(state.levels, 'hold'));
+  applyBoonLevels(combat, {
+    arcane: levelOf(state.levels, 'arcane-power'),
+    haste: levelOf(state.levels, 'haste'),
+    skulls: levelOf(state.levels, 'homing-skulls'),
+    sunbeam: levelOf(state.levels, 'sunbeam'),
+    familiar: levelOf(state.levels, 'familiar'),
+  });
   const maxHp = DEFAULT_ARCHETYPE.wardHp + levelOf(state.levels, 'ward');
   combat.wizard.maxHp = maxHp;
   combat.wizard.hp = Math.min(maxHp, Math.max(0, combat.wizard.hp));

@@ -1,7 +1,12 @@
 // Combatants: room movement, auto-cast, formation, projectiles, pillars,
 // damage + scoring collision (specs 02/04/06, PROGRESS items 4-5), plus the
 // mana + Hold spell layer (item 7: regen/banish mana, per-spell cooldowns
-// through cost/cd/regen mults, auto-north root zones, mana-empty cue).
+// through cost/cd/regen mults, auto-north root zones, mana-empty cue),
+// plus the six-boon set (item 9: Ward max-HP via state.ts, Arcane Power
+// cast/bolt-count curve, Haste move/bolt speed, Homing Skulls homing +
+// splash, Sunbeam heat/cooldown channel that suppresses casts + skulls,
+// Familiar flank drakes with aimed bolts — all under the ~40 wizard-
+// projectile cap).
 // Gameplay reads the normalized `Intent` and never checks raw keys.
 // Breach-ends-run, ward HP + blink invulnerability, and souls scoring all
 // live here; demon lords arrive with item 10.
@@ -14,8 +19,13 @@
 // starting stats (move speed, cast interval, ward HP) are read through it.
 
 import {
+  BEAM_TICK_INTERVAL,
   BOLT_RADIUS,
   DEMON_RADIUS,
+  FAMILIAR_FIRE_INTERVAL,
+  FAMILIAR_LERP_RATE,
+  FAMILIAR_OFFSET_X,
+  FAMILIAR_OFFSET_Y,
   FORMATION_COL_GAP,
   FORMATION_ROW_GAP,
   FORMATION_START_Y,
@@ -27,6 +37,10 @@ import {
   ROOM_LEFT,
   ROOM_RIGHT,
   ROOM_TOP,
+  SKULL_LIFE,
+  SKULL_RADIUS,
+  SKULL_SPEED,
+  SKULL_SPLASH_RADIUS,
   WARD_LINE_Y,
   WIZARD_BOLT_SPEED,
   WIZARD_INVULN_DURATION,
@@ -76,6 +90,66 @@ export const DEFAULT_ARCHETYPE: Archetype = {
   wardHp: 3,
 };
 
+// ---------------------------------------------------------------------------
+// Boon set tuning (spec 03, locked in PROGRESS item 9). All numbers below
+// are the v1 tuning: Arcane 0.35→~0.16s with double at L2 / triple at L4,
+// Haste +25%/level with +20% bolt speed at L2, skulls 1.2/0.9/0.7s x 1/1/2
+// with 60px splash, sunbeam 2s-on/3s-cd (L1) and 3s-on/2s-cd (L2, wider),
+// familiars 0.5s aimed bolts. Caps mirror boons.ts (Ward 3 / Arcane 4 /
+// Haste 2 / Skulls 3 / Sunbeam 2 / Familiar 2).
+// ---------------------------------------------------------------------------
+
+export const ARCANE_CAP = 4;
+export const HASTE_CAP = 2;
+export const SKULL_CAP = 3;
+export const SUNBEAM_CAP = 2;
+export const FAMILIAR_CAP_LEVELS = 2;
+
+/**
+ * Arcane Power cast-interval multipliers per stack (index = level 0-4).
+ * With the default 0.35s base: 0.35 / 0.28 / ~0.23 / ~0.19 / ~0.16s.
+ * Multipliers (not absolutes) so custom archetype bases scale along.
+ */
+export const ARCANE_CAST_MULT = [1.0, 0.8, 0.65, 0.55, 0.46];
+
+/** Wizard bolts per volley per Arcane level (L2 double, L4 triple-spread). */
+export const ARCANE_BOLT_COUNT = [1, 1, 2, 2, 3];
+
+/** Effective auto-cast interval for an Arcane level over an archetype base. */
+export function castIntervalForArcane(baseInterval: number, arcaneLevel: number): number {
+  const level = Math.min(ARCANE_CAP, Math.max(0, Math.floor(arcaneLevel)));
+  return baseInterval * ARCANE_CAST_MULT[level];
+}
+
+/** Bolts per volley for an Arcane level (base damage stays 1, spec 03). */
+export function boltCountForArcane(arcaneLevel: number): number {
+  const level = Math.min(ARCANE_CAP, Math.max(0, Math.floor(arcaneLevel)));
+  return ARCANE_BOLT_COUNT[level];
+}
+
+/** Effective wizard move speed for a Haste level over an archetype base. */
+export function moveSpeedForHaste(baseSpeed: number, hasteLevel: number): number {
+  const level = Math.min(HASTE_CAP, Math.max(0, Math.floor(hasteLevel)));
+  return baseSpeed * (1 + 0.25 * level);
+}
+
+/** Haste L2 also grants +20% wizard bolt speed (spec 03). */
+export function wizardBoltSpeedForHaste(hasteLevel: number): number {
+  return WIZARD_BOLT_SPEED * (Math.floor(hasteLevel) >= 2 ? 1.2 : 1.0);
+}
+
+/** Skull volley interval per Homing-Skulls level (index 0-3; 0 = none). */
+export const SKULL_INTERVALS = [Infinity, 1.2, 0.9, 0.7];
+/** Skulls per volley per level (spec 03: 1 / 1 / 2). */
+export const SKULL_COUNTS = [0, 1, 1, 2];
+
+/** Sunbeam max channel time per level (index 0-2; heat meter, spec 03). */
+export const SUNBEAM_MAX_ON = [0, 2, 3];
+/** Sunbeam forced cooldown after a full heat burn per level. */
+export const SUNBEAM_COOLDOWNS = [0, 3, 2];
+/** Sunbeam beam width per level (L2 wider, spec 03). */
+export const SUNBEAM_WIDTHS = [0, 24, 40];
+
 export interface Wizard {
   x: number;
   y: number;
@@ -110,9 +184,38 @@ export type BoltSide = 'wizard' | 'hellfire';
 export interface Bolt {
   x: number;
   y: number;
+  /** Velocity: wizard bolts fly north (negative vy); spread and familiar
+   * bolts add vx for angled/aimed flight. Hellfire flies south. */
+  vx: number;
   /** Signed vertical velocity: negative flies north, positive south. */
   vy: number;
   side: BoltSide;
+}
+
+/**
+ * Homing skull (spec 03): seeks the nearest live demon, 1 damage on direct
+ * hit plus 1 splash to every other demon within 60px. Fizzles (never
+ * spawns) when no demon is live; strays expire after `SKULL_LIFE`.
+ */
+export interface Skull {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  life: number;
+}
+
+/**
+ * Bound imp-drake (spec 03): invulnerable, flanks the wizard at
+ * ±`FAMILIAR_OFFSET_X` (position lerps each step to avoid jitter), and
+ * auto-casts aimed 1-damage bolts every 0.5s at its nearest demon.
+ */
+export interface Familiar {
+  x: number;
+  y: number;
+  /** Flank side: -1 left, +1 right. */
+  side: -1 | 1;
+  fireTimer: number;
 }
 
 export interface Pillar {
@@ -187,6 +290,34 @@ export interface CombatState {
    * flashes the mana bar while positive; the synth tap lands in item 11.
    */
   manaEmptyTimer: number;
+  // -- Boon set (item 9): stacks granted by the draft, applied by
+  // `applyBoonLevels` (state.ts calls it after every draft pick and at run
+  // start). Runtime clocks below tick on the fixed clock, so tactical pause
+  // freezes them with everything else.
+  /** Arcane Power stacks (0-4): cast interval + bolt count. */
+  arcaneLevel: number;
+  /** Haste stacks (0-2): wizard move speed + L2 bolt speed. */
+  hasteLevel: number;
+  /** Homing Skulls stacks (0-3): volley interval + count. */
+  skullLevel: number;
+  /** Sunbeam stacks (0-2): channel heat/cooldown/width. 0 = not equipped. */
+  sunbeamLevel: number;
+  /** Familiar count (0-2): bound drakes in `familiars`. */
+  familiarLevel: number;
+  /** Countdown to the next skull volley (suppressed while beaming). */
+  skullTimer: number;
+  /** Live homing skulls; counts toward `WIZARD_PROJECTILE_CAP` with bolts. */
+  skulls: Skull[];
+  /** Bound familiars (length always equals `familiarLevel`). */
+  familiars: Familiar[];
+  /** True while the sunbeam channel is live (suppresses casts + skulls). */
+  beamActive: boolean;
+  /** Heat spent in the current channel (cap = `SUNBEAM_MAX_ON[level]`). */
+  beamOnTime: number;
+  /** Forced cooldown after a full heat burn (0 = ready to channel). */
+  beamCooldown: number;
+  /** Damage-tick accumulator for the live beam. */
+  beamTick: number;
 }
 
 /**
@@ -262,6 +393,20 @@ export function createCombat(
     cooldowns: {},
     zones: [],
     manaEmptyTimer: 0,
+    // Item 9: no boons equipped at spawn; state.ts layers the run build on
+    // top via `applyBoonLevels` (fresh combat per incursion, build persists).
+    arcaneLevel: 0,
+    hasteLevel: 0,
+    skullLevel: 0,
+    sunbeamLevel: 0,
+    familiarLevel: 0,
+    skullTimer: 0,
+    skulls: [],
+    familiars: [],
+    beamActive: false,
+    beamOnTime: 0,
+    beamCooldown: 0,
+    beamTick: 0,
   };
 }
 
@@ -269,6 +414,51 @@ export function createCombat(
 export function setHoldRank(combat: CombatState, rank: number): void {
   if (!Number.isFinite(rank)) return;
   combat.holdRank = Math.min(HOLD.cap, Math.max(0, Math.floor(rank)));
+}
+
+/**
+ * Layer the run's boon stacks onto fresh combat (called by state.ts after
+ * every draft pick and at run start). Clamps to caps, (re)builds the
+ * familiar flank to match, and parks runtime clocks idle — levels only
+ * change between incursions, so mid-fight beam/skull state never migrates.
+ */
+export function applyBoonLevels(
+  combat: CombatState,
+  build: { arcane: number; haste: number; skulls: number; sunbeam: number; familiar: number },
+): void {
+  const clamp = (value: number, cap: number): number =>
+    Number.isFinite(value) ? Math.min(cap, Math.max(0, Math.floor(value))) : 0;
+  combat.arcaneLevel = clamp(build.arcane, ARCANE_CAP);
+  combat.hasteLevel = clamp(build.haste, HASTE_CAP);
+  combat.skullLevel = clamp(build.skulls, SKULL_CAP);
+  combat.sunbeamLevel = clamp(build.sunbeam, SUNBEAM_CAP);
+  combat.familiarLevel = clamp(build.familiar, FAMILIAR_CAP_LEVELS);
+  combat.skullTimer = 0;
+  combat.beamActive = false;
+  combat.beamOnTime = 0;
+  combat.beamCooldown = 0;
+  combat.beamTick = 0;
+  syncFamiliars(combat);
+}
+
+/** Rebuild the familiar flank to match `familiarLevel` (cap 2, spec 03). */
+function syncFamiliars(combat: CombatState): void {
+  const wanted = combat.familiarLevel;
+  while (combat.familiars.length < wanted) {
+    const side: -1 | 1 = combat.familiars.length === 0 ? -1 : 1;
+    combat.familiars.push({
+      x: combat.wizard.x + side * FAMILIAR_OFFSET_X,
+      y: combat.wizard.y + FAMILIAR_OFFSET_Y,
+      side,
+      fireTimer: FAMILIAR_FIRE_INTERVAL,
+    });
+  }
+  combat.familiars.length = wanted;
+}
+
+/** Wizard-owned projectiles in flight (bolts incl. familiar bolts + skulls). */
+export function wizardProjectileCount(combat: CombatState): number {
+  return combat.wizardBolts.length + combat.skulls.length;
 }
 
 /** Seconds left on a spell's cooldown (0 when ready). */
@@ -438,21 +628,38 @@ function updateWizard(
 ): void {
   const { wizard } = combat;
   // Intent is a normalized direction (fixed speed above deadzone, spec 06);
-  // keyboard diagonals arrive pre-normalized from the input driver.
-  wizard.x += intent.moveX * archetype.moveSpeed * step;
-  wizard.y += intent.moveY * archetype.moveSpeed * step;
+  // keyboard diagonals arrive pre-normalized from the input driver. Haste
+  // scales the wizard only (spec 03); familiars lerp to their flank.
+  const moveSpeed = moveSpeedForHaste(archetype.moveSpeed, combat.hasteLevel);
+  wizard.x += intent.moveX * moveSpeed * step;
+  wizard.y += intent.moveY * moveSpeed * step;
   clampWizard(wizard);
   resolveWizardPillars(wizard, combat.pillars);
 
   // Auto-cast north is always on (spec 04); Space hold-to-cast needs no key.
+  // Sunbeam suppresses normal casts while channeling (spec 03) — the timer
+  // freezes so the volley resumes cleanly after the channel.
+  if (combat.beamActive) return;
   wizard.castTimer -= step;
   if (wizard.castTimer <= 0) {
-    wizard.castTimer += archetype.castInterval;
-    if (combat.wizardBolts.length < WIZARD_PROJECTILE_CAP) {
+    wizard.castTimer += castIntervalForArcane(archetype.castInterval, combat.arcaneLevel);
+    const count = boltCountForArcane(combat.arcaneLevel);
+    const boltSpeed = wizardBoltSpeedForHaste(combat.hasteLevel);
+    // Spread pattern: solo center, double parallel, triple with angled
+    // wings (base damage stays 1, spec 03). Partial volleys fit the cap.
+    const pattern =
+      count >= 3
+        ? [{ dx: -8, vx: -140 }, { dx: 0, vx: 0 }, { dx: 8, vx: 140 }]
+        : count === 2
+          ? [{ dx: -8, vx: 0 }, { dx: 8, vx: 0 }]
+          : [{ dx: 0, vx: 0 }];
+    for (const slot of pattern) {
+      if (wizardProjectileCount(combat) >= WIZARD_PROJECTILE_CAP) break;
       combat.wizardBolts.push({
-        x: wizard.x,
+        x: wizard.x + slot.dx,
         y: wizard.y - WIZARD_RADIUS,
-        vy: -WIZARD_BOLT_SPEED,
+        vx: slot.vx,
+        vy: -boltSpeed,
         side: 'wizard',
       });
     }
@@ -499,9 +706,242 @@ function updateHellfireSpawns(combat: CombatState, step: number): void {
   combat.hellfire.push({
     x: shooter.x,
     y: shooter.y + 12,
+    vx: 0,
     vy: HELLFIRE_SPEED,
     side: 'hellfire',
   });
+}
+
+/** Nearest live demon to a point (skull homing + familiar aim). */
+function nearestDemon(combat: CombatState, x: number, y: number): Demon | null {
+  let best: Demon | null = null;
+  let bestDist = Infinity;
+  for (const demon of combat.demons) {
+    const dist = (demon.x - x) * (demon.x - x) + (demon.y - y) * (demon.y - y);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = demon;
+    }
+  }
+  return best;
+}
+
+/** Award souls + the flat +2 mana trickle for one banished demon. */
+function banishDemon(combat: CombatState, index: number): number {
+  const demon = combat.demons[index];
+  combat.demons.splice(index, 1);
+  combat.wizard.mana = Math.min(MANA_MAX, combat.wizard.mana + MANA_PER_BANISH);
+  return demonSoulsForKind(demon.kind);
+}
+
+/** Remove every demon at 0 HP after splash/beam ticks; returns souls gained. */
+function sweepBanished(combat: CombatState): number {
+  let souls = 0;
+  for (let i = combat.demons.length - 1; i >= 0; i -= 1) {
+    if (combat.demons[i].hp <= 0) souls += banishDemon(combat, i);
+  }
+  return souls;
+}
+
+/**
+ * Skull volley spawns on the fixed clock (spec 03). Suppressed while the
+ * sunbeam channels; fizzles (no skull, timer still resets) when no demon
+ * is live. Volleys share the ~40 wizard-projectile cap with bolts.
+ */
+function updateSkullSpawns(combat: CombatState, step: number): void {
+  const level = Math.min(SKULL_CAP, Math.max(0, Math.floor(combat.skullLevel)));
+  if (level <= 0 || combat.beamActive) return;
+  combat.skullTimer -= step;
+  if (combat.skullTimer > 0) return;
+  combat.skullTimer += SKULL_INTERVALS[level];
+  if (combat.demons.length === 0) return;
+  const count = SKULL_COUNTS[level];
+  for (let i = 0; i < count; i += 1) {
+    if (wizardProjectileCount(combat) >= WIZARD_PROJECTILE_CAP) break;
+    combat.skulls.push({
+      x: combat.wizard.x + (count === 1 ? 0 : i === 0 ? -6 : 6),
+      y: combat.wizard.y - WIZARD_RADIUS,
+      vx: 0,
+      vy: -SKULL_SPEED,
+      life: SKULL_LIFE,
+    });
+  }
+}
+
+/**
+ * Home skulls onto the nearest live demon; on impact deal 1 direct + 1
+ * splash to every other demon within 60px. Returns souls banished.
+ */
+function updateSkulls(combat: CombatState, step: number): number {
+  let souls = 0;
+  const live: Skull[] = [];
+  for (const skull of combat.skulls) {
+    const target = nearestDemon(combat, skull.x, skull.y);
+    if (target !== null) {
+      const dx = target.x - skull.x;
+      const dy = target.y - skull.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 0) {
+        skull.vx = (dx / dist) * SKULL_SPEED;
+        skull.vy = (dy / dist) * SKULL_SPEED;
+      }
+    }
+    skull.x += skull.vx * step;
+    skull.y += skull.vy * step;
+    skull.life -= step;
+    if (skull.life <= 0) continue;
+    if (
+      skull.x < ROOM_LEFT - 24 ||
+      skull.x > ROOM_RIGHT + 24 ||
+      skull.y < ROOM_TOP - 24 ||
+      skull.y > ROOM_BOTTOM + 24
+    ) {
+      continue;
+    }
+    let hit: Demon | null = null;
+    for (const demon of combat.demons) {
+      if (
+        circlesHit(skull.x, skull.y, SKULL_RADIUS, demon.x, demon.y, DEMON_RADIUS)
+      ) {
+        hit = demon;
+        break;
+      }
+    }
+    if (hit === null) {
+      live.push(skull);
+      continue;
+    }
+    // Direct hit + splash (consumed either way).
+    hit.hp -= 1;
+    for (const demon of combat.demons) {
+      if (demon === hit) continue;
+      const dx = demon.x - hit.x;
+      const dy = demon.y - hit.y;
+      if (dx * dx + dy * dy <= SKULL_SPLASH_RADIUS * SKULL_SPLASH_RADIUS) {
+        demon.hp -= 1;
+      }
+    }
+    souls += sweepBanished(combat);
+  }
+  combat.skulls = live;
+  return souls;
+}
+
+/** Live beam rect (piercing north column over the wizard), or null unequipped. */
+export function beamRectForWizard(
+  wizard: Wizard,
+  sunbeamLevel: number,
+): { x: number; y: number; w: number; h: number } | null {
+  const level = Math.min(SUNBEAM_CAP, Math.max(0, Math.floor(sunbeamLevel)));
+  if (level <= 0) return null;
+  const w = SUNBEAM_WIDTHS[level];
+  const x = Math.min(
+    ROOM_RIGHT - w,
+    Math.max(ROOM_LEFT, wizard.x - w / 2),
+  );
+  return { x, y: ROOM_TOP, w, h: Math.max(0, wizard.y - ROOM_TOP) };
+}
+
+/**
+ * Sunbeam heat/cooldown channel (spec 03): holding `beam` (Space or the
+ * spell-button hold) lights the beam until the heat budget (`SUNBEAM_MAX_ON`)
+ * is spent, which forces the level's cooldown. Releasing early dumps the
+ * heat with no cooldown, so tapping never punishes. Unequipped = no beam.
+ */
+function updateSunbeamChannel(combat: CombatState, intent: Intent, step: number): void {
+  const level = Math.min(SUNBEAM_CAP, Math.max(0, Math.floor(combat.sunbeamLevel)));
+  if (level <= 0) {
+    combat.beamActive = false;
+    combat.beamOnTime = 0;
+    combat.beamCooldown = 0;
+    combat.beamTick = 0;
+    return;
+  }
+  if (combat.beamCooldown > 0) {
+    combat.beamCooldown = Math.max(0, combat.beamCooldown - step);
+  }
+  if (combat.beamActive) {
+    if (!intent.beam) {
+      combat.beamActive = false;
+      combat.beamOnTime = 0;
+      combat.beamTick = 0;
+      return;
+    }
+    combat.beamOnTime += step;
+    if (combat.beamOnTime >= SUNBEAM_MAX_ON[level]) {
+      combat.beamActive = false;
+      combat.beamOnTime = 0;
+      combat.beamTick = 0;
+      combat.beamCooldown = SUNBEAM_COOLDOWNS[level];
+    }
+    return;
+  }
+  if (intent.beam && combat.beamCooldown <= 0) {
+    combat.beamActive = true;
+    combat.beamOnTime = 0;
+    combat.beamTick = 0;
+  }
+}
+
+/**
+ * Beam damage ticks while the channel is live: 1 damage per
+ * `BEAM_TICK_INTERVAL` to every demon intersecting the beam (piercing).
+ * Returns souls banished.
+ */
+function updateBeamDamage(combat: CombatState, step: number): number {
+  if (!combat.beamActive) return 0;
+  const rect = beamRectForWizard(combat.wizard, combat.sunbeamLevel);
+  if (rect === null) return 0;
+  combat.beamTick += step;
+  let souls = 0;
+  while (combat.beamTick >= BEAM_TICK_INTERVAL) {
+    combat.beamTick -= BEAM_TICK_INTERVAL;
+    for (const demon of combat.demons) {
+      const nearestX = Math.min(rect.x + rect.w, Math.max(rect.x, demon.x));
+      const nearestY = Math.min(rect.y + rect.h, Math.max(rect.y, demon.y));
+      const dx = demon.x - nearestX;
+      const dy = demon.y - nearestY;
+      if (dx * dx + dy * dy <= DEMON_RADIUS * DEMON_RADIUS) {
+        demon.hp -= 1;
+      }
+    }
+    souls += sweepBanished(combat);
+    if (combat.demons.length === 0) break;
+  }
+  return souls;
+}
+
+/**
+ * Familiars lerp to their wizard flank each step (spec 03: no jitter) and
+ * auto-cast aimed 1-damage bolts every 0.5s at their nearest demon.
+ * Familiars keep firing while the sunbeam channels (only casts + skulls
+ * pause) and share the ~40 wizard-projectile cap.
+ */
+function updateFamiliars(combat: CombatState, step: number): void {
+  for (const familiar of combat.familiars) {
+    const targetX = combat.wizard.x + familiar.side * FAMILIAR_OFFSET_X;
+    const targetY = combat.wizard.y + FAMILIAR_OFFSET_Y;
+    const k = Math.min(1, FAMILIAR_LERP_RATE * step);
+    familiar.x += (targetX - familiar.x) * k;
+    familiar.y += (targetY - familiar.y) * k;
+    familiar.fireTimer -= step;
+    if (familiar.fireTimer > 0) continue;
+    familiar.fireTimer += FAMILIAR_FIRE_INTERVAL;
+    const target = nearestDemon(combat, familiar.x, familiar.y);
+    if (target === null) continue;
+    if (wizardProjectileCount(combat) >= WIZARD_PROJECTILE_CAP) continue;
+    const dx = target.x - familiar.x;
+    const dy = target.y - familiar.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist === 0) continue;
+    combat.wizardBolts.push({
+      x: familiar.x,
+      y: familiar.y,
+      vx: (dx / dist) * WIZARD_BOLT_SPEED,
+      vy: (dy / dist) * WIZARD_BOLT_SPEED,
+      side: 'wizard',
+    });
+  }
 }
 
 function boltHitsPillar(bolt: Bolt, pillar: Pillar): boolean {
@@ -519,10 +959,13 @@ function boltHitsPillar(bolt: Bolt, pillar: Pillar): boolean {
  */
 function updateBolts(combat: CombatState, step: number): void {
   for (const bolt of [...combat.wizardBolts, ...combat.hellfire]) {
+    bolt.x += bolt.vx * step;
     bolt.y += bolt.vy * step;
   }
   const blocks = (bolt: Bolt): boolean => {
     if (bolt.y < ROOM_TOP - 24 || bolt.y > ROOM_BOTTOM + 24) return true;
+    // Angled spread / aimed familiar bolts can leave sideways too.
+    if (bolt.x < ROOM_LEFT - 24 || bolt.x > ROOM_RIGHT + 24) return true;
     for (const pillar of combat.pillars) {
       if (boltHitsPillar(bolt, pillar)) {
         pillar.hp -= 1;
@@ -589,9 +1032,7 @@ function resolveHits(combat: CombatState): number {
     const demon = combat.demons[hitIndex];
     demon.hp -= 1;
     if (demon.hp <= 0) {
-      combat.demons.splice(hitIndex, 1);
-      souls += demonSoulsForKind(demon.kind);
-      combat.wizard.mana = Math.min(MANA_MAX, combat.wizard.mana + MANA_PER_BANISH);
+      souls += banishDemon(combat, hitIndex);
     }
   }
   combat.wizardBolts = survivingBolts;
@@ -655,12 +1096,20 @@ export function updateCombat(
   if (intent.spell1) {
     tryCastHold(combat);
   }
+  // Sunbeam channel first: `beamActive` suppresses normal casts + skull
+  // spawns below (spec 03); familiars keep firing.
+  updateSunbeamChannel(combat, intent, step);
   updateWizard(combat, intent, step, archetype);
   updateHold(combat, step);
   updateFormation(combat, step);
   updateHellfireSpawns(combat, step);
+  updateSkullSpawns(combat, step);
+  const skullSouls = updateSkulls(combat, step);
+  updateFamiliars(combat, step);
   updateBolts(combat, step);
-  const souls = resolveHits(combat);
+  const beamSouls = updateBeamDamage(combat, step);
+  const hitSouls = resolveHits(combat);
+  const souls = skullSouls + beamSouls + hitSouls;
   const breached = checkBreach(combat);
   const wizardDead = combat.wizard.hp <= 0;
   // A breached line is never a "clear", even if the last bolt lands first.
