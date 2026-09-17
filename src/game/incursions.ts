@@ -36,6 +36,36 @@ export function demonHpForKind(kind: DemonKind): number {
   return kind === 'brute' ? 3 : 1;
 }
 
+/**
+ * Souls per banished demon (spec 02): imp 10, cackler 20, bat 30,
+ * brute 50. Demon lords use `lordSoulsForTier` below instead.
+ */
+export function demonSoulsForKind(kind: DemonKind): number {
+  switch (kind) {
+    case 'imp':
+      return 10;
+    case 'cackler':
+      return 20;
+    case 'bat':
+      return 30;
+    case 'brute':
+      return 50;
+  }
+}
+
+/** Incursion-clear bonus: `25 * incursion` (spec 02). */
+export function clearBonusForIncursion(incursion: number): number {
+  return 25 * Math.max(1, Math.floor(incursion));
+}
+
+/**
+ * No-hit incursion bonus: +50% of the clear bonus (spec 02). Kept as
+ * integer souls via floor, so incursion 1 pays 25 + 12 = 37.
+ */
+export function noHitBonusForIncursion(incursion: number): number {
+  return Math.floor(clearBonusForIncursion(incursion) / 2);
+}
+
 /** Demon lord HP: `60 + 25 x tier`, where tier = incursion / 5 (spec 02). */
 export function lordHpForTier(tier: number): number {
   return 60 + 25 * tier;

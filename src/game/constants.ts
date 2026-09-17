@@ -54,6 +54,9 @@ export const WIZARD_BOLT_SPEED = 540;
 /** Southbound hellfire speed (px/s, reference units). */
 export const HELLFIRE_SPEED = 240;
 
+/** Brief invulnerability + blink after the wizard takes a hit (spec 02). */
+export const WIZARD_INVULN_DURATION = 1.0;
+
 // Formation movement (spec 02). The drift/fire-rate scaling formulas per
 // incursion number arrive with item 6; these are the unscaled base values.
 export const FORMATION_BASE_SPEED = 26;

@@ -5,7 +5,9 @@
 // projectiles, mana, cooldowns, and particles all stop together.
 
 import { createCombat, updateCombat, type CombatState } from './entities.ts';
+import { clearBonusForIncursion, noHitBonusForIncursion } from './incursions.ts';
 import type { Intent } from './input.ts';
+import { loadHighScore, saveHighScore } from './storage.ts';
 
 export type Screen = 'menu' | 'incursion' | 'draft' | 'gameover';
 
@@ -19,6 +21,10 @@ export interface RunState {
   pauseReason: PauseReason | null;
   /** Displayed as souls banished; numeric `score` in code (spec 02). */
   score: number;
+  /** Best run persisted via `ww.highScore` (spec 06). */
+  highScore: number;
+  /** True when this run set a new best (game-over badge, spec 05). */
+  newBest: boolean;
   /** Current incursion number (1-based once a run starts). */
   incursion: number;
   /** Sim seconds accrued only while the sim runs — proves the freeze. */
@@ -33,6 +39,8 @@ export function createInitialState(): RunState {
     paused: false,
     pauseReason: null,
     score: 0,
+    highScore: loadHighScore(),
+    newBest: false,
     incursion: 0,
     runTime: 0,
     combat: null,
@@ -58,6 +66,7 @@ export function startRun(state: RunState): void {
   state.paused = false;
   state.pauseReason = null;
   state.score = 0;
+  state.newBest = false;
   state.incursion = 1;
   state.runTime = 0;
   state.combat = createCombat(1);
@@ -77,9 +86,14 @@ export function chooseDraftCard(state: RunState, _index: number): void {
   state.combat = createCombat(state.incursion);
 }
 
-/** Death or ward-line breach ends the run (spec 02). */
+/** Death or ward-line breach ends the run (spec 02). Persists a new best. */
 export function triggerGameOver(state: RunState): void {
   if (state.screen !== 'incursion' && state.screen !== 'draft') return;
+  if (state.score > state.highScore) {
+    state.highScore = state.score;
+    state.newBest = true;
+    saveHighScore(state.score);
+  }
   state.screen = 'gameover';
   state.paused = false;
   state.pauseReason = null;
@@ -109,12 +123,13 @@ export function togglePause(state: RunState, reason: PauseReason = 'manual'): vo
   }
 }
 
-/** Back out to the menu; clears any pause. */
+/** Back out to the menu; clears any pause. Keeps the persisted best. */
 export function quitToMenu(state: RunState): void {
   state.screen = 'menu';
   state.paused = false;
   state.pauseReason = null;
   state.score = 0;
+  state.newBest = false;
   state.incursion = 0;
   state.runTime = 0;
   state.combat = null;
@@ -122,10 +137,25 @@ export function quitToMenu(state: RunState): void {
 
 /**
  * Advance sim clocks + room combat; no-op unless the sim is running
- * (freeze-safe: pause/menu/draft/gameover tick nothing).
+ * (freeze-safe: pause/menu/draft/gameover tick nothing). Folds the step's
+ * souls into the score, then resolves terminal flags: breach or depleted
+ * ward HP ends the run, a banished formation pays the clear bonus (+50%
+ * no-hit bonus when the wizard was never touched) and parks on draft.
  */
 export function advanceSim(state: RunState, step: number, intent: Intent): void {
   if (!isSimRunning(state) || state.combat === null) return;
   state.runTime += step;
-  updateCombat(state.combat, intent, step);
+  const result = updateCombat(state.combat, intent, step);
+  state.score += result.souls;
+  if (result.breached || result.wizardDead) {
+    triggerGameOver(state);
+    return;
+  }
+  if (result.cleared) {
+    state.score += clearBonusForIncursion(state.incursion);
+    if (!state.combat.tookHit) {
+      state.score += noHitBonusForIncursion(state.incursion);
+    }
+    completeIncursion(state);
+  }
 }

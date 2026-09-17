@@ -17,7 +17,6 @@ import { drawJoystickOverlay, drawScaffoldScreen, hitButtonAt } from './game/ren
 import { loadMuted, saveMuted } from './game/storage.ts';
 import {
   chooseDraftCard,
-  completeIncursion,
   createInitialState,
   isUpdateFrozen,
   pauseGame,
@@ -25,7 +24,6 @@ import {
   resumeGame,
   startRun,
   advanceSim,
-  triggerGameOver,
 } from './game/state.ts';
 
 /** CSS-pixel scale that letterboxes the reference space (`contain`). */
@@ -182,12 +180,6 @@ function boot(): void {
       if (key === 'p' || key === 'P' || key === 'Escape') {
         event.preventDefault();
         pauseGame(state, 'manual');
-      } else if (key === 'c' || key === 'C') {
-        // Placeholder until items 5-6 detect real clears.
-        completeIncursion(state);
-      } else if (key === 'x' || key === 'X') {
-        // Placeholder until item 5 detects real death/breach.
-        triggerGameOver(state);
       }
       return;
     }
