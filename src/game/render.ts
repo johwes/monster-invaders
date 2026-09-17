@@ -4,6 +4,18 @@
 // overlay) so transitions and the freeze are verifiable before real art lands.
 
 import { REFERENCE_WIDTH, REFERENCE_HEIGHT } from './constants.ts';
+import {
+  BOLT_RADIUS,
+  DEMON_RADIUS,
+  PORTAL_MOUTH,
+  ROOM_BOTTOM,
+  ROOM_LEFT,
+  ROOM_RIGHT,
+  ROOM_TOP,
+  WARD_LINE_Y,
+  WIZARD_RADIUS,
+} from './constants.ts';
+import type { Demon } from './entities.ts';
 import type { JoystickVisual, TouchScheme } from './input.ts';
 import type { RunState } from './state.ts';
 
@@ -176,26 +188,112 @@ function paintMenuShell(ctx: CanvasRenderingContext2D, ui: ScaffoldUi): void {
   paintButton(ctx, MENU_MUTE_BUTTON, `Sound: ${ui.muted ? 'Off' : 'On'} (M)`);
 }
 
-function paintRunShell(ctx: CanvasRenderingContext2D, state: RunState, ui: ScaffoldUi): void {
-  // Empty-room outline only: real floor, portal, pillars, and ward line
-  // arrive with items 4/11. Geometry here is a placeholder frame.
+const DEMON_COLORS: Record<Demon['kind'], string> = {
+  imp: '#b3372e',
+  cackler: '#c26a1b',
+  brute: '#7e1f3d',
+  bat: '#8f86a3',
+};
+
+/** Room floor, portal, ward line, pillars, and combatants (item 4 art). */
+function paintRoom(ctx: CanvasRenderingContext2D, state: RunState): void {
+  // Stone floor.
+  ctx.fillStyle = '#1d1826';
+  ctx.fillRect(ROOM_LEFT, ROOM_TOP, ROOM_RIGHT - ROOM_LEFT, ROOM_BOTTOM - ROOM_TOP);
   ctx.strokeStyle = '#3a3348';
   ctx.lineWidth = 2;
-  ctx.strokeRect(24, 24, REFERENCE_WIDTH - 48, REFERENCE_HEIGHT - 48);
+  ctx.strokeRect(ROOM_LEFT, ROOM_TOP, ROOM_RIGHT - ROOM_LEFT, ROOM_BOTTOM - ROOM_TOP);
 
-  // Portal mouth (north) placeholder.
+  // Portal: ember glow spanning the north mouth.
+  const portalW = PORTAL_MOUTH.x1 - PORTAL_MOUTH.x0;
   ctx.fillStyle = '#b3541e';
-  ctx.fillRect(REFERENCE_WIDTH / 2 - 150, 24, 300, 12);
+  ctx.fillRect(PORTAL_MOUTH.x0, ROOM_TOP - 8, portalW, 14);
+  ctx.fillStyle = 'rgba(179, 84, 30, 0.25)';
+  ctx.fillRect(PORTAL_MOUTH.x0 - 12, ROOM_TOP + 6, portalW + 24, 26);
 
-  // Ward line (south) placeholder.
+  // Ward line (south).
   ctx.fillStyle = '#6f5fd0';
-  ctx.fillRect(48, REFERENCE_HEIGHT - 72, REFERENCE_WIDTH - 96, 3);
+  ctx.fillRect(ROOM_LEFT, WARD_LINE_Y, ROOM_RIGHT - ROOM_LEFT, 3);
 
-  paintTitle(
-    ctx,
-    `Incursion ${state.incursion}`,
-    `run — placeholder shell (t=${state.runTime.toFixed(1)}s, souls ${state.score})`,
+  const combat = state.combat;
+  if (combat === null) return;
+
+  // Rune pillars (rubble-dark as they chip).
+  for (const pillar of combat.pillars) {
+    if (pillar.hp <= 0) continue;
+    ctx.fillStyle = pillar.hp >= 3 ? '#4a4360' : pillar.hp === 2 ? '#3d3752' : '#322c46';
+    ctx.fillRect(pillar.x, pillar.y, pillar.w, pillar.h);
+    ctx.strokeStyle = '#6f5fd0';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(pillar.x, pillar.y, pillar.w, pillar.h);
+    // HP pips: remaining cover cells.
+    ctx.fillStyle = '#8f86a3';
+    for (let i = 0; i < pillar.hp; i += 1) {
+      ctx.beginPath();
+      ctx.arc(pillar.x + 14 + i * 18, pillar.y + pillar.h / 2, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Demons: horned circles.
+  for (const demon of combat.demons) {
+    ctx.fillStyle = DEMON_COLORS[demon.kind];
+    ctx.beginPath();
+    ctx.arc(demon.x, demon.y, DEMON_RADIUS, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#e8e0d0';
+    ctx.beginPath();
+    ctx.moveTo(demon.x - DEMON_RADIUS, demon.y - 4);
+    ctx.lineTo(demon.x - DEMON_RADIUS - 6, demon.y - 14);
+    ctx.lineTo(demon.x - DEMON_RADIUS + 4, demon.y - 10);
+    ctx.moveTo(demon.x + DEMON_RADIUS, demon.y - 4);
+    ctx.lineTo(demon.x + DEMON_RADIUS + 6, demon.y - 14);
+    ctx.lineTo(demon.x + DEMON_RADIUS - 4, demon.y - 10);
+    ctx.fill();
+  }
+
+  // Wizard bolts (northbound) and hellfire (southbound).
+  for (const bolt of combat.wizardBolts) {
+    ctx.fillStyle = '#e8e0d0';
+    ctx.fillRect(bolt.x - 2, bolt.y - BOLT_RADIUS - 4, 4, 10);
+  }
+  for (const bolt of combat.hellfire) {
+    ctx.fillStyle = '#ff7a2f';
+    ctx.beginPath();
+    ctx.arc(bolt.x, bolt.y, BOLT_RADIUS + 1, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Wizard: arcane-violet robe + brim.
+  const wizard = combat.wizard;
+  ctx.fillStyle = '#6f5fd0';
+  ctx.beginPath();
+  ctx.arc(wizard.x, wizard.y, WIZARD_RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#e8e0d0';
+  ctx.beginPath();
+  ctx.arc(wizard.x, wizard.y - 4, 5, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function paintRunShell(ctx: CanvasRenderingContext2D, state: RunState, ui: ScaffoldUi): void {
+  paintRoom(ctx, state);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#8f86a3';
+  ctx.font = '16px sans-serif';
+  ctx.fillText(
+    `Incursion ${state.incursion} — t=${state.runTime.toFixed(1)}s, souls ${state.score}`,
+    REFERENCE_WIDTH / 2,
+    16,
+  );
+  ctx.fillStyle = '#5f5878';
+  ctx.font = '13px sans-serif';
+  ctx.fillText(
     'C: clear → draft (placeholder) · X: breach → gameover · P/Esc: pause',
+    REFERENCE_WIDTH / 2,
+    REFERENCE_HEIGHT - 12,
   );
 
   // Pause button (always visible mid-incursion).
