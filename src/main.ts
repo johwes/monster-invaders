@@ -1,7 +1,8 @@
 // Boot, canvas sizing, and screen switching (spec 06).
-// The fixed-timestep loop and state machine arrive with PROGRESS items
-// 1-2; today this mounts the canvas, fits 960x540 reference units with
-// DPR capped at 2, and paints the scaffold placeholder.
+// Item 1 wires the fixed-timestep loop: 60 Hz updates with clamped delta,
+// logic in 960x540 reference units, render scaled with DPR capped at 2.
+// Screen transitions here are placeholders cycled by key/tap — the real
+// run state machine arrives with PROGRESS item 2.
 
 import './style.css';
 import {
@@ -9,42 +10,70 @@ import {
   REFERENCE_HEIGHT,
   REFERENCE_WIDTH,
 } from './game/constants.ts';
+import { createLoop } from './game/loop.ts';
 import { drawScaffoldScreen } from './game/render.ts';
 import { createInitialState } from './game/state.ts';
 
-function fitCanvas(canvas: HTMLCanvasElement): CanvasRenderingContext2D | null {
-  const ctx = canvas.getContext('2d');
-  if (ctx === null) return null;
+/** CSS-pixel scale that letterboxes the reference space (`contain`). */
+let viewScale = 1;
 
+function resize(canvas: HTMLCanvasElement): void {
   const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
-  const scale = Math.min(
+  viewScale = Math.min(
     window.innerWidth / REFERENCE_WIDTH,
     window.innerHeight / REFERENCE_HEIGHT,
   );
 
-  canvas.width = Math.round(REFERENCE_WIDTH * scale * dpr);
-  canvas.height = Math.round(REFERENCE_HEIGHT * scale * dpr);
-  canvas.style.width = `${Math.round(REFERENCE_WIDTH * scale)}px`;
-  canvas.style.height = `${Math.round(REFERENCE_HEIGHT * scale)}px`;
-
-  ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
-  return ctx;
+  canvas.width = Math.max(1, Math.round(REFERENCE_WIDTH * viewScale * dpr));
+  canvas.height = Math.max(1, Math.round(REFERENCE_HEIGHT * viewScale * dpr));
+  canvas.style.width = `${Math.round(REFERENCE_WIDTH * viewScale)}px`;
+  canvas.style.height = `${Math.round(REFERENCE_HEIGHT * viewScale)}px`;
 }
 
 function boot(): void {
   const canvas = document.querySelector<HTMLCanvasElement>('#game');
   if (canvas === null) return;
+  const ctx = canvas.getContext('2d');
+  if (ctx === null) return;
 
   const state = createInitialState();
 
-  const paint = (): void => {
-    const ctx = fitCanvas(canvas);
-    if (ctx === null) return;
-    drawScaffoldScreen(ctx, state.screen);
-  };
+  const loop = createLoop({
+    update(_step): void {
+      // TODO(item 2+): advance the run simulation here. No entities yet —
+      // the 60 Hz tick itself is the item-1 deliverable.
+    },
+    render(): void {
+      // Re-derive the transform every frame: DPR can change without a
+      // resize (e.g. window dragged across monitors).
+      const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
+      ctx.setTransform(viewScale * dpr, 0, 0, viewScale * dpr, 0, 0);
+      drawScaffoldScreen(ctx, state.screen);
+    },
+  });
 
-  window.addEventListener('resize', paint);
-  paint();
+  // TODO(item 2): replace with the menu -> incursion -> gameover machine.
+  const cycleScreen = (): void => {
+    state.screen =
+      state.screen === 'menu'
+        ? 'run'
+        : state.screen === 'run'
+          ? 'gameover'
+          : 'menu';
+  };
+  window.addEventListener('keydown', (event: KeyboardEvent): void => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      cycleScreen();
+    }
+  });
+  canvas.addEventListener('click', cycleScreen);
+
+  window.addEventListener('resize', (): void => {
+    resize(canvas);
+  });
+  resize(canvas);
+  loop.start();
 }
 
 boot();
