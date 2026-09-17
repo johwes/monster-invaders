@@ -7,7 +7,7 @@ locked behavior or a tuning decision — progress logging goes here, not in spec
 - [x] 0. Scaffold: Vite + TS, `src/` layout per `specs/06-tech-architecture.md`, pick `incursion/demon` vs `wave/invader` naming, record exact `npm install / dev / build / preview` in AGENTS.md.
 - [x] 1. Loop + canvas: fixed-timestep 60 Hz update w/ clamped delta, 960×540 reference units, DPR-capped-at-2 scaling, screen shell (menu/run/gameover placeholders).
 - [x] 2. Run state machine: menu → incursion → draft → … → gameover; tactical pause (`P`/`Esc`/button, blur auto-pause) freezing demons/projectiles/mana/cooldowns/particles.
-- [ ] 3. Input: normalized `intent { moveX, moveY, casting, beam, spell1 }` abstraction; keyboard (WASD/arrows, Q/E spell, 1/2/3 draft, P/Esc pause, M mute); touch floating joystick (default) + relative-drag fallback, spell/pause buttons.
+- [x] 3. Input: normalized `intent { moveX, moveY, casting, beam, spell1 }` abstraction; keyboard (WASD/arrows, Q/E spell, 1/2/3 draft, P/Esc pause, M mute); touch floating joystick (default) + relative-drag fallback, spell/pause buttons.
 - [ ] 4. Room + combatants: whole-room wizard movement (260 px/s, diagonals normalized), auto-cast north (0.35s interval), demon formation entry/movement (imp first), hellfire south, rune pillars blocking both sides.
 - [ ] 5. Damage + scoring: circle/AABB collision, 3 ward HP + 1s blink invulnerability, breach-ends-run, souls scoring + clear/no-hit bonuses, `ww.highScore` persistence.
 - [ ] 6. Incursion flow: composition scaling (rows/cols, cackler i2+, brute i3+, bat i4+), drift/fire-rate formulas per `specs/02-gameplay.md`, endless loop with draft trigger between incursions.
