@@ -41,6 +41,14 @@ wizard's starting ground. The wizard roams the whole room interior with
 - **Demon lord:** large multi-HP boss with 2–3 attack patterns (hellfire
   spread, aimed burst, summon minions or sweeping beam telegraph). One demon
   lord type in v1 is acceptable; patterns scale with lord tier.
+  v1 lock (item 10): single lord type hovering at y≈150, drift 70 px/s
+  +5%/tier bouncing across the room; rotation spread (5 bolts, 7 at
+  tier 3+) → aimed burst (`min(5, 2+tier)` bolts) → summon (2 minions,
+  3 at tier 3+, max 12 alive; brute unlock at tier 2) on a
+  `max(1.1s, 2.2s − 0.15s×tier)` timer. No pillars on lord fights; the
+  next normal incursion rebuilds fresh cover. The fight clears only once
+  the lord is banished AND any summoned minions are cleared, then pays
+  the normal clear/no-hit bonus and advances to draft.
 
 ## Mana, spells, tactical pause
 

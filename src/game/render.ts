@@ -5,12 +5,14 @@
 // Item 7 adds the functional spell HUD on top: Hold zones + shackle tint,
 // mana bar with cost tick and mana-empty flash, spell button cost label
 // with cooldown sweep. Item 9 adds minimal boon visuals (sunbeam column,
-// skulls, familiars); full art polish arrives with item 11.
+// skulls, familiars); item 10 adds the demon lord sprite + HP bar; full
+// art polish arrives with item 11.
 
 import { REFERENCE_WIDTH, REFERENCE_HEIGHT } from './constants.ts';
 import {
   BOLT_RADIUS,
   DEMON_RADIUS,
+  LORD_RADIUS,
   PORTAL_MOUTH,
   ROOM_BOTTOM,
   ROOM_LEFT,
@@ -297,6 +299,55 @@ function paintRoom(ctx: CanvasRenderingContext2D, state: RunState): void {
     }
   }
 
+  // Demon lord (item 10): large horned boss, ember core. Slowed (not
+  // rooted) inside Hold zones — the violet ring reads the 50% slow.
+  if (combat.lord !== null) {
+    const lord = combat.lord;
+    ctx.fillStyle = '#d43d2a';
+    ctx.beginPath();
+    ctx.arc(lord.x, lord.y, LORD_RADIUS, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffb347';
+    ctx.beginPath();
+    ctx.arc(lord.x, lord.y, 10, 0, Math.PI * 2);
+    ctx.fill();
+    // Crown horns.
+    ctx.fillStyle = '#e8e0d0';
+    ctx.beginPath();
+    ctx.moveTo(lord.x - LORD_RADIUS, lord.y - 8);
+    ctx.lineTo(lord.x - LORD_RADIUS - 12, lord.y - 28);
+    ctx.lineTo(lord.x - LORD_RADIUS + 8, lord.y - 20);
+    ctx.moveTo(lord.x + LORD_RADIUS, lord.y - 8);
+    ctx.lineTo(lord.x + LORD_RADIUS + 12, lord.y - 28);
+    ctx.lineTo(lord.x + LORD_RADIUS - 8, lord.y - 20);
+    ctx.fill();
+    // Eyes.
+    ctx.fillStyle = '#14101c';
+    ctx.beginPath();
+    ctx.arc(lord.x - 9, lord.y - 4, 3, 0, Math.PI * 2);
+    ctx.arc(lord.x + 9, lord.y - 4, 3, 0, Math.PI * 2);
+    ctx.fill();
+    let slowed = false;
+    for (const zone of combat.zones) {
+      if (
+        lord.x >= zone.x &&
+        lord.x <= zone.x + zone.w &&
+        lord.y >= zone.y &&
+        lord.y <= zone.y + zone.h
+      ) {
+        slowed = true;
+        break;
+      }
+    }
+    if (slowed) {
+      ctx.strokeStyle = '#9d8fff';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(lord.x, lord.y, LORD_RADIUS + 5, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
   // Sunbeam channel (item 9): piercing north column over the wizard.
   // Translucent so demons inside stay readable; full HUD heat meter in 11.
   if (combat.beamActive) {
@@ -416,13 +467,39 @@ function paintRunShell(ctx: CanvasRenderingContext2D, state: RunState, ui: Scaff
     REFERENCE_HEIGHT - 12,
   );
 
+  // Demon lord HP bar (spec 05, item 10): top-center bar on lord fights.
+  const lord = state.combat?.lord ?? null;
+  if (lord !== null) {
+    const barW = 400;
+    const barH = 12;
+    const barX = REFERENCE_WIDTH / 2 - barW / 2;
+    const barY = 28;
+    const frac = Math.min(1, Math.max(0, lord.hp / lord.maxHp));
+    ctx.fillStyle = '#241f33';
+    ctx.fillRect(barX, barY, barW, barH);
+    ctx.fillStyle = '#d43d2a';
+    ctx.fillRect(barX, barY, barW * frac, barH);
+    ctx.strokeStyle = '#e8e0d0';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(barX, barY, barW, barH);
+    ctx.fillStyle = '#e8e0d0';
+    ctx.font = '13px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(
+      `DEMON LORD — tier ${lord.tier} · ${Math.max(0, lord.hp)}/${lord.maxHp}`,
+      REFERENCE_WIDTH / 2,
+      barY + barH + 12,
+    );
+  }
+
   // Pause button (always visible mid-incursion).
   paintButton(ctx, PAUSE_BUTTON, 'II');
 
   // Spell button (item 7: tap = cast, hold = channel). Cost label,
   // cooldown sweep, and a dimmed look when on cooldown, unaffordable, or
   // with no spell equipped; the press edge draws a violet border.
-  // Full HUD polish (boon icons, lord bar) lands in item 11.
+  // Full HUD polish (boon icons) lands in item 11.
   const combat = state.combat;
   let spellLabel = 'Hold —';
   let cooldownFrac = 0;

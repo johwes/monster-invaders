@@ -6,12 +6,12 @@
 // cast/bolt-count curve, Haste move/bolt speed, Homing Skulls homing +
 // splash, Sunbeam heat/cooldown channel that suppresses casts + skulls,
 // Familiar flank drakes with aimed bolts — all under the ~40 wizard-
-// projectile cap).
+// projectile cap), plus the demon lord (item 10: every-5th-incursion boss
+// with spread/aimed/summon patterns, Hold slows 50% never roots, no
+// pillars, 500 x tier souls, draft on banish).
 // Gameplay reads the normalized `Intent` and never checks raw keys.
 // Breach-ends-run, ward HP + blink invulnerability, and souls scoring all
-// live here; demon lords arrive with item 10.
-// Per-incursion scaling (composition via incursions.ts, drift/fire-rate
-// off CombatState.incursion) is wired.
+// live here.
 // Per-incursion scaling (composition via incursions.ts, drift/fire-rate
 // off CombatState.incursion) is wired.
 //
@@ -31,6 +31,10 @@ import {
   FORMATION_START_Y,
   FORMATION_STEP_DOWN,
   HELLFIRE_SPEED,
+  LORD_BASE_SPEED,
+  LORD_RADIUS,
+  LORD_SPAWN_Y,
+  LORD_SUMMON_CAP,
   PILLARS,
   PORTAL_MOUTH,
   ROOM_BOTTOM,
@@ -57,6 +61,11 @@ import {
   driftSpeedForIncursion,
   fireIntervalForIncursion,
   formationLayout,
+  isLordIncursion,
+  lordAttackIntervalForTier,
+  lordHpForTier,
+  lordSoulsForTier,
+  lordTierForIncursion,
   thinSpeedMultiplier,
 } from './incursions.ts';
 import {
@@ -65,6 +74,7 @@ import {
   effectiveCost,
   effectiveRegen,
   HOLD,
+  HOLD_LORD_SLOW,
   holdRankDef,
   MANA_MAX,
   MANA_PER_BANISH,
@@ -179,6 +189,29 @@ export interface Demon {
   holdTimer: number;
 }
 
+/**
+ * Demon lord (spec 02, item 10): one large multi-HP boss on every 5th
+ * incursion. Drifts horizontally near the portal and cycles three attack
+ * patterns (hellfire spread, aimed burst, summon minions) on a tier-scaled
+ * timer. Hold never roots the lord — zones slow its drift 50% instead
+ * (`HOLD_LORD_SLOW`), attacks continue while slowed. Contact/bolt damage
+ * is 1, like normal demons.
+ */
+export interface DemonLord {
+  x: number;
+  y: number;
+  hp: number;
+  maxHp: number;
+  /** Lord tier = `floor(incursion / 5)` (min 1); drives HP/souls/patterns. */
+  tier: number;
+  /** Shared-drift style direction: +1 east, -1 west. */
+  dir: 1 | -1;
+  /** Countdown to the next pattern in the spread → aimed → summon cycle. */
+  attackTimer: number;
+  /** Index into the 3-pattern rotation (advances after every attack). */
+  patternIndex: number;
+}
+
 export type BoltSide = 'wizard' | 'hellfire';
 
 export interface Bolt {
@@ -253,6 +286,8 @@ export const MANA_EMPTY_CUE_DURATION = 0.5;
 export interface CombatState {
   wizard: Wizard;
   demons: Demon[];
+  /** Live demon lord, or null on normal incursions / once banished. */
+  lord: DemonLord | null;
   wizardBolts: Bolt[];
   hellfire: Bolt[];
   pillars: Pillar[];
@@ -370,17 +405,38 @@ export function createPillars(): Pillar[] {
   return PILLARS.map((p) => ({ ...p }));
 }
 
+/** Build the demon lord for an incursion (centered under the portal). */
+export function createDemonLord(incursion: number): DemonLord {
+  const tier = lordTierForIncursion(incursion);
+  const hp = lordHpForTier(tier);
+  return {
+    x: (ROOM_LEFT + ROOM_RIGHT) / 2,
+    y: LORD_SPAWN_Y,
+    hp,
+    maxHp: hp,
+    tier,
+    dir: 1,
+    attackTimer: lordAttackIntervalForTier(tier),
+    patternIndex: 0,
+  };
+}
+
 export function createCombat(
   incursion: number,
   archetype: Archetype = DEFAULT_ARCHETYPE,
 ): CombatState {
-  const demons = createDemons(incursion);
+  const lordFight = isLordIncursion(incursion);
+  const demons = lordFight ? [] : createDemons(incursion);
+  const lord = lordFight ? createDemonLord(incursion) : null;
   return {
     wizard: createWizard(archetype),
     demons,
+    lord,
     wizardBolts: [],
     hellfire: [],
-    pillars: createPillars(),
+    // Lord fights have no pillars (spec 02); the next normal incursion
+    // rebuilds fresh cover in its own `createCombat`, so nothing restores.
+    pillars: lordFight ? [] : createPillars(),
     formationDir: 1,
     fireTimer: fireIntervalForIncursion(incursion),
     incursion,
@@ -712,6 +768,131 @@ function updateHellfireSpawns(combat: CombatState, step: number): void {
   });
 }
 
+/** True while the lord's center sits inside any live Hold zone. */
+function isLordSlowed(combat: CombatState): boolean {
+  const lord = combat.lord;
+  if (lord === null) return false;
+  for (const zone of combat.zones) {
+    if (
+      lord.x >= zone.x &&
+      lord.x <= zone.x + zone.w &&
+      lord.y >= zone.y &&
+      lord.y <= zone.y + zone.h
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Hellfire spread fan from the lord (pattern 0): southward, 1 damage. */
+function lordFireSpread(combat: CombatState): void {
+  const lord = combat.lord;
+  if (lord === null) return;
+  const wide = lord.tier >= 3;
+  const vxs = wide ? [-240, -160, -80, 0, 80, 160, 240] : [-160, -80, 0, 80, 160];
+  for (const vx of vxs) {
+    combat.hellfire.push({
+      x: lord.x,
+      y: lord.y + LORD_RADIUS,
+      vx,
+      vy: HELLFIRE_SPEED,
+      side: 'hellfire',
+    });
+  }
+}
+
+/** Aimed burst at the wizard (pattern 1): `min(5, 2 + tier)` bolts. */
+function lordFireAimed(combat: CombatState): void {
+  const lord = combat.lord;
+  if (lord === null) return;
+  const dx = combat.wizard.x - lord.x;
+  const dy = combat.wizard.y - lord.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist === 0) return;
+  const count = Math.min(5, 2 + lord.tier);
+  for (let i = 0; i < count; i += 1) {
+    // Slight speed stagger per bolt so the burst strings out instead of
+    // stacking on one pixel (still 1 damage each, spec 02).
+    const speed = HELLFIRE_SPEED * (1 + 0.12 * (i - (count - 1) / 2));
+    combat.hellfire.push({
+      x: lord.x,
+      y: lord.y + LORD_RADIUS,
+      vx: (dx / dist) * speed,
+      vy: (dy / dist) * speed,
+      side: 'hellfire',
+    });
+  }
+}
+
+/** Summon minions around the lord (pattern 2), capped at `LORD_SUMMON_CAP`. */
+function lordSummonMinions(combat: CombatState): void {
+  const lord = combat.lord;
+  if (lord === null) return;
+  const room = LORD_SUMMON_CAP - combat.demons.length;
+  if (room <= 0) return;
+  const count = Math.min(lord.tier >= 3 ? 3 : 2, room);
+  for (let i = 0; i < count; i += 1) {
+    const kind: DemonKind =
+      lord.tier >= 2 && i % 3 === 2 ? 'brute' : i % 2 === 0 ? 'imp' : 'cackler';
+    const x = Math.min(
+      ROOM_RIGHT - DEMON_RADIUS,
+      Math.max(ROOM_LEFT + DEMON_RADIUS, lord.x + (i - (count - 1) / 2) * 44),
+    );
+    combat.demons.push({
+      kind,
+      x,
+      y: Math.min(WARD_LINE_Y - 24, lord.y + 40),
+      hp: demonHpForKind(kind),
+      holdTimer: 0,
+    });
+  }
+}
+
+/**
+ * Lord drift + attack cycle on the fixed clock (pause freezes it because
+ * `updateCombat` never runs while frozen). Drift slows 50% inside Hold
+ * zones (never rooted); attacks continue while slowed — Hold pins
+ * movement, not attacks.
+ */
+function updateDemonLord(combat: CombatState, step: number): void {
+  const lord = combat.lord;
+  if (lord === null) return;
+  const slowed = isLordSlowed(combat);
+  const speed =
+    LORD_BASE_SPEED * (1 + 0.05 * lord.tier) * (slowed ? HOLD_LORD_SLOW : 1);
+  lord.x += lord.dir * speed * step;
+  if (lord.x < ROOM_LEFT + LORD_RADIUS) {
+    lord.x = ROOM_LEFT + LORD_RADIUS;
+    lord.dir = 1;
+  } else if (lord.x > ROOM_RIGHT - LORD_RADIUS) {
+    lord.x = ROOM_RIGHT - LORD_RADIUS;
+    lord.dir = -1;
+  }
+  lord.attackTimer -= step;
+  if (lord.attackTimer > 0) return;
+  lord.attackTimer += lordAttackIntervalForTier(lord.tier);
+  const pattern = lord.patternIndex % 3;
+  lord.patternIndex += 1;
+  if (pattern === 0) lordFireSpread(combat);
+  else if (pattern === 1) lordFireAimed(combat);
+  else lordSummonMinions(combat);
+}
+
+/**
+ * Banish the live lord: pays `500 x tier` souls plus the flat +2 mana
+ * trickle (like any banish), then clears the slot. Callers check
+ * `lord.hp <= 0` after dealing damage and fold the return into the step's
+ * souls. Returns 0 when no lord is live or it survives.
+ */
+function banishLordIfDead(combat: CombatState): number {
+  const lord = combat.lord;
+  if (lord === null || lord.hp > 0) return 0;
+  combat.lord = null;
+  combat.wizard.mana = Math.min(MANA_MAX, combat.wizard.mana + MANA_PER_BANISH);
+  return lordSoulsForTier(lord.tier);
+}
+
 /** Nearest live demon to a point (skull homing + familiar aim). */
 function nearestDemon(combat: CombatState, x: number, y: number): Demon | null {
   let best: Demon | null = null;
@@ -724,6 +905,32 @@ function nearestDemon(combat: CombatState, x: number, y: number): Demon | null {
     }
   }
   return best;
+}
+
+/**
+ * Nearest live target (demon or lord) to a point for skull homing and
+ * familiar aim. Returns world coords plus which side hit; null when
+ * nothing is live.
+ */
+function nearestTarget(
+  combat: CombatState,
+  x: number,
+  y: number,
+): { x: number; y: number; isLord: boolean; demon: Demon | null } | null {
+  const demon = nearestDemon(combat, x, y);
+  const demonDist =
+    demon === null ? Infinity : (demon.x - x) * (demon.x - x) + (demon.y - y) * (demon.y - y);
+  const lord = combat.lord;
+  const lordDist =
+    lord === null ? Infinity : (lord.x - x) * (lord.x - x) + (lord.y - y) * (lord.y - y);
+  if (demon === null && lord === null) return null;
+  if (lord !== null && lordDist <= demonDist) {
+    return { x: lord.x, y: lord.y, isLord: true, demon: null };
+  }
+  if (demon !== null) {
+    return { x: demon.x, y: demon.y, isLord: false, demon };
+  }
+  return null;
 }
 
 /** Award souls + the flat +2 mana trickle for one banished demon. */
@@ -746,7 +953,7 @@ function sweepBanished(combat: CombatState): number {
 /**
  * Skull volley spawns on the fixed clock (spec 03). Suppressed while the
  * sunbeam channels; fizzles (no skull, timer still resets) when no demon
- * is live. Volleys share the ~40 wizard-projectile cap with bolts.
+ * or lord is live. Volleys share the ~40 wizard-projectile cap with bolts.
  */
 function updateSkullSpawns(combat: CombatState, step: number): void {
   const level = Math.min(SKULL_CAP, Math.max(0, Math.floor(combat.skullLevel)));
@@ -754,7 +961,7 @@ function updateSkullSpawns(combat: CombatState, step: number): void {
   combat.skullTimer -= step;
   if (combat.skullTimer > 0) return;
   combat.skullTimer += SKULL_INTERVALS[level];
-  if (combat.demons.length === 0) return;
+  if (combat.demons.length === 0 && combat.lord === null) return;
   const count = SKULL_COUNTS[level];
   for (let i = 0; i < count; i += 1) {
     if (wizardProjectileCount(combat) >= WIZARD_PROJECTILE_CAP) break;
@@ -769,14 +976,15 @@ function updateSkullSpawns(combat: CombatState, step: number): void {
 }
 
 /**
- * Home skulls onto the nearest live demon; on impact deal 1 direct + 1
- * splash to every other demon within 60px. Returns souls banished.
+ * Home skulls onto the nearest live target (demon or lord); on impact deal
+ * 1 direct + 1 splash to every other demon within 60px (a lord direct hit
+ * splashes nearby minions). Returns souls banished.
  */
 function updateSkulls(combat: CombatState, step: number): number {
   let souls = 0;
   const live: Skull[] = [];
   for (const skull of combat.skulls) {
-    const target = nearestDemon(combat, skull.x, skull.y);
+    const target = nearestTarget(combat, skull.x, skull.y);
     if (target !== null) {
       const dx = target.x - skull.x;
       const dy = target.y - skull.y;
@@ -796,6 +1004,23 @@ function updateSkulls(combat: CombatState, step: number): number {
       skull.y < ROOM_TOP - 24 ||
       skull.y > ROOM_BOTTOM + 24
     ) {
+      continue;
+    }
+    // Lord impact first (larger target, often above the minions).
+    if (
+      combat.lord !== null &&
+      circlesHit(skull.x, skull.y, SKULL_RADIUS, combat.lord.x, combat.lord.y, LORD_RADIUS)
+    ) {
+      combat.lord.hp -= 1;
+      for (const demon of combat.demons) {
+        const dx = demon.x - combat.lord.x;
+        const dy = demon.y - combat.lord.y;
+        if (dx * dx + dy * dy <= SKULL_SPLASH_RADIUS * SKULL_SPLASH_RADIUS) {
+          demon.hp -= 1;
+        }
+      }
+      souls += sweepBanished(combat);
+      souls += banishLordIfDead(combat);
       continue;
     }
     let hit: Demon | null = null;
@@ -822,6 +1047,7 @@ function updateSkulls(combat: CombatState, step: number): number {
       }
     }
     souls += sweepBanished(combat);
+    souls += banishLordIfDead(combat);
   }
   combat.skulls = live;
   return souls;
@@ -885,8 +1111,8 @@ function updateSunbeamChannel(combat: CombatState, intent: Intent, step: number)
 
 /**
  * Beam damage ticks while the channel is live: 1 damage per
- * `BEAM_TICK_INTERVAL` to every demon intersecting the beam (piercing).
- * Returns souls banished.
+ * `BEAM_TICK_INTERVAL` to every demon intersecting the beam (piercing),
+ * plus the lord when it intersects. Returns souls banished.
  */
 function updateBeamDamage(combat: CombatState, step: number): number {
   if (!combat.beamActive) return 0;
@@ -894,6 +1120,13 @@ function updateBeamDamage(combat: CombatState, step: number): number {
   if (rect === null) return 0;
   combat.beamTick += step;
   let souls = 0;
+  const hitsLord = (lord: DemonLord): boolean => {
+    const nearestX = Math.min(rect.x + rect.w, Math.max(rect.x, lord.x));
+    const nearestY = Math.min(rect.y + rect.h, Math.max(rect.y, lord.y));
+    const dx = lord.x - nearestX;
+    const dy = lord.y - nearestY;
+    return dx * dx + dy * dy <= LORD_RADIUS * LORD_RADIUS;
+  };
   while (combat.beamTick >= BEAM_TICK_INTERVAL) {
     combat.beamTick -= BEAM_TICK_INTERVAL;
     for (const demon of combat.demons) {
@@ -905,17 +1138,21 @@ function updateBeamDamage(combat: CombatState, step: number): number {
         demon.hp -= 1;
       }
     }
+    if (combat.lord !== null && hitsLord(combat.lord)) {
+      combat.lord.hp -= 1;
+    }
     souls += sweepBanished(combat);
-    if (combat.demons.length === 0) break;
+    souls += banishLordIfDead(combat);
+    if (combat.demons.length === 0 && combat.lord === null) break;
   }
   return souls;
 }
 
 /**
  * Familiars lerp to their wizard flank each step (spec 03: no jitter) and
- * auto-cast aimed 1-damage bolts every 0.5s at their nearest demon.
- * Familiars keep firing while the sunbeam channels (only casts + skulls
- * pause) and share the ~40 wizard-projectile cap.
+ * auto-cast aimed 1-damage bolts every 0.5s at their nearest target
+ * (demon or lord). Familiars keep firing while the sunbeam channels (only
+ * casts + skulls pause) and share the ~40 wizard-projectile cap.
  */
 function updateFamiliars(combat: CombatState, step: number): void {
   for (const familiar of combat.familiars) {
@@ -927,7 +1164,7 @@ function updateFamiliars(combat: CombatState, step: number): void {
     familiar.fireTimer -= step;
     if (familiar.fireTimer > 0) continue;
     familiar.fireTimer += FAMILIAR_FIRE_INTERVAL;
-    const target = nearestDemon(combat, familiar.x, familiar.y);
+    const target = nearestTarget(combat, familiar.x, familiar.y);
     if (target === null) continue;
     if (wizardProjectileCount(combat) >= WIZARD_PROJECTILE_CAP) continue;
     const dx = target.x - familiar.x;
@@ -1008,9 +1245,10 @@ function damageWizard(combat: CombatState): boolean {
 
 /**
  * Circle collision, both directions (spec 06: circle/AABB is fine).
- * Wizard bolts (1 damage) banish demons for souls; each banish also
- * trickles +2 mana (flat, capped at max — spec 03). Hellfire and demon
- * contact deal 1 ward damage through `damageWizard`. Returns souls gained.
+ * Wizard bolts (1 damage) banish demons and the lord for souls; each
+ * banish also trickles +2 mana (flat, capped at max — spec 03). Hellfire
+ * and demon/lord contact deal 1 ward damage through `damageWizard`.
+ * Returns souls gained.
  */
 function resolveHits(combat: CombatState): number {
   let souls = 0;
@@ -1025,15 +1263,24 @@ function resolveHits(combat: CombatState): number {
         break;
       }
     }
-    if (hitIndex === -1) {
-      survivingBolts.push(bolt);
+    if (hitIndex !== -1) {
+      const demon = combat.demons[hitIndex];
+      demon.hp -= 1;
+      if (demon.hp <= 0) {
+        souls += banishDemon(combat, hitIndex);
+      }
+      souls += banishLordIfDead(combat);
       continue;
     }
-    const demon = combat.demons[hitIndex];
-    demon.hp -= 1;
-    if (demon.hp <= 0) {
-      souls += banishDemon(combat, hitIndex);
+    if (
+      combat.lord !== null &&
+      circlesHit(bolt.x, bolt.y, BOLT_RADIUS, combat.lord.x, combat.lord.y, LORD_RADIUS)
+    ) {
+      combat.lord.hp -= 1;
+      souls += banishLordIfDead(combat);
+      continue;
     }
+    survivingBolts.push(bolt);
   }
   combat.wizardBolts = survivingBolts;
 
@@ -1049,9 +1296,9 @@ function resolveHits(combat: CombatState): number {
   }
   combat.hellfire = survivingHellfire;
 
-  // North roaming risks contact damage (spec 02): demon touch burns 1 ward
-  // HP through the same invulnerability gate. Demons survive the bump —
-  // the ward line behind them still ends the run.
+  // North roaming risks contact damage (spec 02): demon or lord touch
+  // burns 1 ward HP through the same invulnerability gate. Demons survive
+  // the bump — the ward line behind them still ends the run.
   for (const demon of combat.demons) {
     if (
       circlesHit(demon.x, demon.y, DEMON_RADIUS, combat.wizard.x, combat.wizard.y, WIZARD_RADIUS)
@@ -1060,19 +1307,32 @@ function resolveHits(combat: CombatState): number {
       break;
     }
   }
+  if (
+    combat.lord !== null &&
+    circlesHit(
+      combat.lord.x,
+      combat.lord.y,
+      LORD_RADIUS,
+      combat.wizard.x,
+      combat.wizard.y,
+      WIZARD_RADIUS,
+    )
+  ) {
+    damageWizard(combat);
+  }
 
   return souls;
 }
 
 /**
- * Breach-ends-run (spec 02): any demon center at/past the ward line ends
- * the run immediately, even if the wizard is roaming north.
+ * Breach-ends-run (spec 02): any demon — or the lord — at/past the ward
+ * line ends the run immediately, even if the wizard is roaming north.
  */
 function checkBreach(combat: CombatState): boolean {
   for (const demon of combat.demons) {
     if (demon.y >= WARD_LINE_Y) return true;
   }
-  return false;
+  return combat.lord !== null && combat.lord.y >= WARD_LINE_Y;
 }
 
 /**
@@ -1102,6 +1362,7 @@ export function updateCombat(
   updateWizard(combat, intent, step, archetype);
   updateHold(combat, step);
   updateFormation(combat, step);
+  updateDemonLord(combat, step);
   updateHellfireSpawns(combat, step);
   updateSkullSpawns(combat, step);
   const skullSouls = updateSkulls(combat, step);
@@ -1113,6 +1374,9 @@ export function updateCombat(
   const breached = checkBreach(combat);
   const wizardDead = combat.wizard.hp <= 0;
   // A breached line is never a "clear", even if the last bolt lands first.
-  const cleared = !breached && !wizardDead && combat.demons.length === 0;
+  // Lord fights clear only once the lord is banished AND any summoned
+  // minions are cleared (spec 02 "banish all demons" extended to the boss).
+  const cleared =
+    !breached && !wizardDead && combat.demons.length === 0 && combat.lord === null;
   return { souls, breached, cleared, wizardDead };
 }

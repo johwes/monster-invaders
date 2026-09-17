@@ -86,9 +86,22 @@ export const FORMATION_START_Y = 130;
 
 // Rune-pillar cover (spec 02): 3 pillars blocking both sides' projectiles.
 // HP-cell model: each blocked bolt deals 1 damage; destroyed pillars stop
-// blocking. Demon-lord fights have no pillars (item 10 decides restore).
+// blocking. Demon-lord fights have no pillars and pillars rebuild fresh on
+// the next normal incursion (locked in item 10).
 export const PILLARS = [
   { x: 208, y: 340, w: 64, h: 24, hp: 3 },
   { x: 448, y: 340, w: 64, h: 24, hp: 3 },
   { x: 688, y: 340, w: 64, h: 24, hp: 3 },
 ];
+
+// Demon lord (spec 02, locked in PROGRESS item 10): one large boss on every
+// 5th incursion. Single lord type in v1 with three attack patterns
+// (hellfire spread, aimed burst, summon minions) cycling on a tier-scaled
+// timer. Contact/bolt damage is 1, like normal demons.
+export const LORD_RADIUS = 28;
+/** Lord hover line near the portal (drifts horizontally, never dives). */
+export const LORD_SPAWN_Y = 150;
+/** Unscaled horizontal drift speed (px/s); tier adds +5%/tier. */
+export const LORD_BASE_SPEED = 70;
+/** Max summoned minions alive at once (summon excess fizzles). */
+export const LORD_SUMMON_CAP = 12;
