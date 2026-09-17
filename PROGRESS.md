@@ -9,7 +9,7 @@ locked behavior or a tuning decision — progress logging goes here, not in spec
 - [x] 2. Run state machine: menu → incursion → draft → … → gameover; tactical pause (`P`/`Esc`/button, blur auto-pause) freezing demons/projectiles/mana/cooldowns/particles.
 - [x] 3. Input: normalized `intent { moveX, moveY, casting, beam, spell1 }` abstraction; keyboard (WASD/arrows, Q/E spell, 1/2/3 draft, P/Esc pause, M mute); touch floating joystick (default) + relative-drag fallback, spell/pause buttons.
 - [x] 4. Room + combatants: whole-room wizard movement (260 px/s, diagonals normalized), auto-cast north (0.35s interval), demon formation entry/movement (imp first), hellfire south, rune pillars blocking both sides.
-- [ ] 5. Damage + scoring: circle/AABB collision, 3 ward HP + 1s blink invulnerability, breach-ends-run, souls scoring + clear/no-hit bonuses, `ww.highScore` persistence.
+- [x] 5. Damage + scoring: circle/AABB collision, 3 ward HP + 1s blink invulnerability, breach-ends-run, souls scoring + clear/no-hit bonuses, `ww.highScore` persistence.
 - [ ] 6. Incursion flow: composition scaling (rows/cols, cackler i2+, brute i3+, bat i4+), drift/fire-rate formulas per `specs/02-gameplay.md`, endless loop with draft trigger between incursions.
 - [ ] 7. Mana + Hold: 100 mana / 8s regen + 2-per-banish, per-spell cooldowns, `costMult`/`cdMult`/`regenMult` hooks, Hold L1/L2 auto-north zone (roots normals, 50% slows lords, re-cast refreshes), `mana-empty` cue.
 - [ ] 8. Draft: pause + pick-1-of-3 (Boon/Spell labeled, 1/2/3 keys + tap), stacking caps, Lesser-Heal fallback, delta preview on cards (e.g. "0.35→0.28s").
