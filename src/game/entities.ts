@@ -1,8 +1,12 @@
 // Combatants: room movement, auto-cast, formation, projectiles, pillars,
-// damage + scoring collision (specs 02/04/06, PROGRESS items 4-5). Gameplay
-// reads the normalized `Intent` and never checks raw keys. Breach-ends-run,
-// ward HP + blink invulnerability, and souls scoring all live here;
-// mana/cooldowns arrive with item 7; demon lords with item 10.
+// damage + scoring collision (specs 02/04/06, PROGRESS items 4-5), plus the
+// mana + Hold spell layer (item 7: regen/banish mana, per-spell cooldowns
+// through cost/cd/regen mults, auto-north root zones, mana-empty cue).
+// Gameplay reads the normalized `Intent` and never checks raw keys.
+// Breach-ends-run, ward HP + blink invulnerability, and souls scoring all
+// live here; demon lords arrive with item 10.
+// Per-incursion scaling (composition via incursions.ts, drift/fire-rate
+// off CombatState.incursion) is wired.
 // Per-incursion scaling (composition via incursions.ts, drift/fire-rate
 // off CombatState.incursion) is wired.
 //
@@ -29,6 +33,7 @@ import {
   WIZARD_PROJECTILE_CAP,
   WIZARD_RADIUS,
   WIZARD_START,
+  ZONE_CAP,
 } from './constants.ts';
 import type { Intent } from './input.ts';
 import {
@@ -40,7 +45,19 @@ import {
   formationLayout,
   thinSpeedMultiplier,
 } from './incursions.ts';
-import { MANA_MAX } from './spells.ts';
+import {
+  DEFAULT_MODIFIERS,
+  effectiveCooldown,
+  effectiveCost,
+  effectiveRegen,
+  HOLD,
+  holdRankDef,
+  MANA_MAX,
+  MANA_PER_BANISH,
+  MANA_REGEN,
+  type CostModifiers,
+  type SpellRank,
+} from './spells.ts';
 
 export type DemonKind = 'imp' | 'cackler' | 'brute' | 'bat';
 
@@ -79,6 +96,13 @@ export interface Demon {
   x: number;
   y: number;
   hp: number;
+  /**
+   * Seconds of Hold root left. Refreshed while the demon's center is inside
+   * an active zone; ticks down on the fixed clock (pause freezes it).
+   * Rooted demons (`holdTimer > 0`) skip formation drift and step-down but
+   * still spit hellfire — Hold pins movement, not attacks.
+   */
+  holdTimer: number;
 }
 
 export type BoltSide = 'wizard' | 'hellfire';
@@ -99,6 +123,30 @@ export interface Pillar {
   hp: number;
 }
 
+/**
+ * Active Hold zone (spec 06: an entity with TTL). Axis-aligned rect
+ * projected auto-north of the wizard at cast time; it does not follow the
+ * wizard afterwards. Re-casting while zones are live adds a fresh zone, and
+ * any demon covered by a zone has its root refreshed to that zone's
+ * remaining TTL (spec 03: re-rooting refreshes duration).
+ */
+export interface HoldZone {
+  /** Top-left corner in reference units. */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Seconds until the zone expires; ticks down on the fixed clock. */
+  ttl: number;
+  /** Full duration at cast time (render pulse + refresh reference). */
+  duration: number;
+  /** Hold rank that cast it (1-based; drives zone size). */
+  rank: number;
+}
+
+/** How long a failed cast flashes the mana bar (visual `mana-empty` cue). */
+export const MANA_EMPTY_CUE_DURATION = 0.5;
+
 export interface CombatState {
   wizard: Wizard;
   demons: Demon[];
@@ -117,6 +165,28 @@ export interface CombatState {
    * `createCombat`; read at clear time for the no-hit bonus (spec 02).
    */
   tookHit: boolean;
+  /**
+   * Cost/cooldown/regen multipliers (spec 03 discount hooks, default 1.0).
+   * Future boons/equipment adjust these; spell costs, cooldowns, and mana
+   * regen always read through them. Item 8 owns run-level persistence.
+   */
+  modifiers: CostModifiers;
+  /**
+   * Equipped Hold rank: 0 = no spell equipped (spec 02 starting kit; the
+   * draft in item 8 grants ranks), 1-2 = Hold L1/L2. Use `setHoldRank`.
+   */
+  holdRank: number;
+  /** Per-spell cooldowns left, keyed by spell id (`hold`). Ticks down on
+   * the fixed clock, so tactical pause freezes them with everything else. */
+  cooldowns: Record<string, number>;
+  /** Live Hold zones (cap `ZONE_CAP`; oldest is replaced past the cap). */
+  zones: HoldZone[];
+  /**
+   * Seconds of `mana-empty` cue left (spec 04): set on any failed cast
+   * (no spell, on cooldown, or insufficient mana) with no lockout. Render
+   * flashes the mana bar while positive; the synth tap lands in item 11.
+   */
+  manaEmptyTimer: number;
 }
 
 /**
@@ -158,6 +228,7 @@ export function createDemons(incursion: number): Demon[] {
         x: startX + col * FORMATION_COL_GAP,
         y: FORMATION_START_Y + row * FORMATION_ROW_GAP,
         hp: demonHpForKind(kind),
+        holdTimer: 0,
       });
     }
   }
@@ -184,7 +255,146 @@ export function createCombat(
     incursion,
     initialDemons: demons.length,
     tookHit: false,
+    modifiers: { ...DEFAULT_MODIFIERS },
+    // Spec 02 starting kit: bolt, no spell equipped. Item 8's draft grants
+    // Hold ranks via `setHoldRank` (same setter the checks below use).
+    holdRank: 0,
+    cooldowns: {},
+    zones: [],
+    manaEmptyTimer: 0,
   };
+}
+
+/** Equip a Hold rank (0 = unequipped), clamped to `0..HOLD.cap`. */
+export function setHoldRank(combat: CombatState, rank: number): void {
+  if (!Number.isFinite(rank)) return;
+  combat.holdRank = Math.min(HOLD.cap, Math.max(0, Math.floor(rank)));
+}
+
+/** Seconds left on a spell's cooldown (0 when ready). */
+export function cooldownRemaining(combat: CombatState, spellId: string): number {
+  return Math.max(0, combat.cooldowns[spellId] ?? 0);
+}
+
+/** Effective mana cost of the equipped Hold rank (0 when unequipped). */
+export function holdManaCost(combat: CombatState): number {
+  const rank = holdRankDef(combat.holdRank);
+  return rank === null ? 0 : effectiveCost(rank.cost, combat.modifiers);
+}
+
+/** Full effective cooldown of the equipped Hold rank (0 when unequipped). */
+export function holdCooldownTotal(combat: CombatState): number {
+  const rank = holdRankDef(combat.holdRank);
+  return rank === null ? 0 : effectiveCooldown(rank.cooldown, combat.modifiers);
+}
+
+export type HoldCastResult = 'cast' | 'no-spell' | 'on-cooldown' | 'no-mana';
+
+/**
+ * Project the Hold zone auto-north of the wizard: centered on the wizard's
+ * x (clamped so the zone stays in the room), sitting just north of the
+ * wizard so it never covers them. The zone is static once cast.
+ */
+export function holdZoneForWizard(wizard: Wizard, rank: SpellRank, rankIndex: number): HoldZone {
+  const y1 = wizard.y - WIZARD_RADIUS - 8;
+  const x = Math.min(
+    ROOM_RIGHT - rank.zoneW,
+    Math.max(ROOM_LEFT, wizard.x - rank.zoneW / 2),
+  );
+  return {
+    x,
+    y: y1 - rank.zoneH,
+    w: rank.zoneW,
+    h: rank.zoneH,
+    ttl: rank.duration,
+    duration: rank.duration,
+    rank: rankIndex,
+  };
+}
+
+/**
+ * Cast the equipped spell from the normalized `spell1` edge (spec 04: Q/E
+ * or the spell-button tap). Success deducts effective mana, starts the
+ * effective per-spell cooldown, and projects the zone. Any failure sets the
+ * `mana-empty` cue timer with no lockout. Returns the outcome so callers
+ * (and headless checks) can distinguish the three fail reasons.
+ */
+export function tryCastHold(combat: CombatState): HoldCastResult {
+  const rank = holdRankDef(combat.holdRank);
+  if (rank === null) {
+    combat.manaEmptyTimer = MANA_EMPTY_CUE_DURATION;
+    return 'no-spell';
+  }
+  if (cooldownRemaining(combat, HOLD.id) > 0) {
+    combat.manaEmptyTimer = MANA_EMPTY_CUE_DURATION;
+    return 'on-cooldown';
+  }
+  const cost = effectiveCost(rank.cost, combat.modifiers);
+  if (combat.wizard.mana < cost) {
+    combat.manaEmptyTimer = MANA_EMPTY_CUE_DURATION;
+    return 'no-mana';
+  }
+  combat.wizard.mana = Math.max(0, combat.wizard.mana - cost);
+  combat.cooldowns[HOLD.id] = effectiveCooldown(rank.cooldown, combat.modifiers);
+  if (combat.zones.length >= ZONE_CAP) {
+    // Perf cap, not a cast gate: the oldest zone yields to the fresh cast.
+    combat.zones.shift();
+  }
+  combat.zones.push(holdZoneForWizard(combat.wizard, rank, combat.holdRank));
+  return 'cast';
+}
+
+/** True while the demon's center sits inside the zone rect. */
+export function demonInZone(demon: Demon, zone: HoldZone): boolean {
+  return (
+    demon.x >= zone.x &&
+    demon.x <= zone.x + zone.w &&
+    demon.y >= zone.y &&
+    demon.y <= zone.y + zone.h
+  );
+}
+
+/**
+ * Tick zones + roots on the fixed clock: zone TTLs decay (expired zones
+ * leave), demon hold timers decay, and any demon covered by a live zone
+ * has its root refreshed to that zone's remaining TTL. Covered demons stay
+ * rooted exactly while cover lasts; a re-cast's fresh TTL re-roots them.
+ */
+export function updateHold(combat: CombatState, step: number): void {
+  for (const zone of combat.zones) {
+    zone.ttl -= step;
+  }
+  combat.zones = combat.zones.filter((zone) => zone.ttl > 0);
+  for (const demon of combat.demons) {
+    if (demon.holdTimer > 0) {
+      demon.holdTimer = Math.max(0, demon.holdTimer - step);
+    }
+    for (const zone of combat.zones) {
+      if (demonInZone(demon, zone) && zone.ttl > demon.holdTimer) {
+        demon.holdTimer = zone.ttl;
+      }
+    }
+  }
+}
+
+/**
+ * Mana + cooldown clocks on the fixed clock (pause freezes them because
+ * `updateCombat` never runs while frozen). Regen reads through `regenMult`;
+ * the per-banish trickle (+2, flat) lands in `resolveHits` where demons
+ * are banished.
+ */
+function updateMana(combat: CombatState, step: number): void {
+  const { wizard } = combat;
+  wizard.mana = Math.min(
+    MANA_MAX,
+    wizard.mana + effectiveRegen(MANA_REGEN, combat.modifiers) * step,
+  );
+  if (combat.manaEmptyTimer > 0) {
+    combat.manaEmptyTimer = Math.max(0, combat.manaEmptyTimer - step);
+  }
+  for (const spellId of Object.keys(combat.cooldowns)) {
+    combat.cooldowns[spellId] = Math.max(0, (combat.cooldowns[spellId] ?? 0) - step);
+  }
 }
 
 function clampWizard(wizard: Wizard): void {
@@ -249,9 +459,12 @@ function updateWizard(
   }
 }
 
-/** Classic sidle: drift across the room, step south + reverse on edge hit. */
+/** Classic sidle: drift across the room, step south + reverse on edge hit.
+ * Hold-rooted demons sit out: they are excluded from the edge check and
+ * neither drift nor step down while `holdTimer` runs. */
 function updateFormation(combat: CombatState, step: number): void {
-  if (combat.demons.length === 0) return;
+  const mobile = combat.demons.filter((demon) => demon.holdTimer <= 0);
+  if (mobile.length === 0) return;
   // Per-incursion drift multiplier plus the thin-formation speed-up
   // (spec 02): a full late horde sidles well above base, and the last
   // demons move up to 2x faster than their incursion's drift speed.
@@ -261,18 +474,18 @@ function updateFormation(combat: CombatState, step: number): void {
   const dx = combat.formationDir * speed * step;
   let minX = Infinity;
   let maxX = -Infinity;
-  for (const demon of combat.demons) {
+  for (const demon of mobile) {
     if (demon.x < minX) minX = demon.x;
     if (demon.x > maxX) maxX = demon.x;
   }
   if (minX + dx < ROOM_LEFT || maxX + dx > ROOM_RIGHT) {
     combat.formationDir = combat.formationDir === 1 ? -1 : 1;
-    for (const demon of combat.demons) {
+    for (const demon of mobile) {
       demon.y += FORMATION_STEP_DOWN;
     }
     return;
   }
-  for (const demon of combat.demons) {
+  for (const demon of mobile) {
     demon.x += dx;
   }
 }
@@ -352,7 +565,8 @@ function damageWizard(combat: CombatState): boolean {
 
 /**
  * Circle collision, both directions (spec 06: circle/AABB is fine).
- * Wizard bolts (1 damage) banish demons for souls; hellfire and demon
+ * Wizard bolts (1 damage) banish demons for souls; each banish also
+ * trickles +2 mana (flat, capped at max — spec 03). Hellfire and demon
  * contact deal 1 ward damage through `damageWizard`. Returns souls gained.
  */
 function resolveHits(combat: CombatState): number {
@@ -377,6 +591,7 @@ function resolveHits(combat: CombatState): number {
     if (demon.hp <= 0) {
       combat.demons.splice(hitIndex, 1);
       souls += demonSoulsForKind(demon.kind);
+      combat.wizard.mana = Math.min(MANA_MAX, combat.wizard.mana + MANA_PER_BANISH);
     }
   }
   combat.wizardBolts = survivingBolts;
@@ -433,7 +648,15 @@ export function updateCombat(
   if (combat.wizard.invulnTimer > 0) {
     combat.wizard.invulnTimer = Math.max(0, combat.wizard.invulnTimer - step);
   }
+  updateMana(combat, step);
+  // One-shot spell edge: Q/E or the spell-button tap (spec 04). Consumed
+  // here per fixed step; main.ts delivers it on exactly one step via
+  // `consumeSpellPress`, so holding Q never multi-casts across steps.
+  if (intent.spell1) {
+    tryCastHold(combat);
+  }
   updateWizard(combat, intent, step, archetype);
+  updateHold(combat, step);
   updateFormation(combat, step);
   updateHellfireSpawns(combat, step);
   updateBolts(combat, step);

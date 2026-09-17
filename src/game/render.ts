@@ -2,6 +2,9 @@
 // with PROGRESS item 11; this file paints the item-2 screen shells for the
 // run state machine (menu / incursion / draft / gameover + tactical-pause
 // overlay) so transitions and the freeze are verifiable before real art lands.
+// Item 7 adds the functional spell HUD on top: Hold zones + shackle tint,
+// mana bar with cost tick and mana-empty flash, spell button cost label
+// with cooldown sweep.
 
 import { REFERENCE_WIDTH, REFERENCE_HEIGHT } from './constants.ts';
 import {
@@ -16,7 +19,13 @@ import {
   WIZARD_RADIUS,
 } from './constants.ts';
 import type { Demon } from './entities.ts';
+import {
+  cooldownRemaining,
+  holdCooldownTotal,
+  holdManaCost,
+} from './entities.ts';
 import type { JoystickVisual, TouchScheme } from './input.ts';
+import { HOLD, MANA_MAX } from './spells.ts';
 import type { RunState } from './state.ts';
 
 export interface ButtonRect {
@@ -47,8 +56,9 @@ export const PAUSE_BUTTON: ButtonRect = {
 /**
  * Spell button: dedicated on-screen button, >=56px on the right side
  * (spec 04). Tap casts the equipped spell; hold channels Sunbeam when it
- * is equipped instead. Mana-cost label + cooldown sweep arrive with items
- * 7/11; the shell shows the wiring with a press flash.
+ * is equipped instead. Shows the mana-cost label, a cooldown sweep, and a
+ * dimmed look when unaffordable, on cooldown, or with no spell (item 7);
+ * full art polish arrives with item 11.
  */
 export const SPELL_BUTTON: ButtonRect = {
   id: 'spell',
@@ -218,6 +228,30 @@ function paintRoom(ctx: CanvasRenderingContext2D, state: RunState): void {
   const combat = state.combat;
   if (combat === null) return;
 
+  // Hold zones (item 7): glowing rune rects projected auto-north at cast
+  // time. Over the floor, under combatants; the pulse rides the zone TTL.
+  for (const zone of combat.zones) {
+    const pulse = 0.16 + 0.06 * Math.sin(zone.ttl * 9);
+    ctx.fillStyle = `rgba(111, 95, 208, ${pulse.toFixed(3)})`;
+    ctx.fillRect(zone.x, zone.y, zone.w, zone.h);
+    ctx.strokeStyle = '#9d8fff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(zone.x, zone.y, zone.w, zone.h);
+    ctx.strokeStyle = 'rgba(157, 143, 255, 0.8)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.ellipse(
+      zone.x + zone.w / 2,
+      zone.y + zone.h / 2,
+      zone.w * 0.28,
+      zone.h * 0.28,
+      0,
+      0,
+      Math.PI * 2,
+    );
+    ctx.stroke();
+  }
+
   // Rune pillars (rubble-dark as they chip).
   for (const pillar of combat.pillars) {
     if (pillar.hp <= 0) continue;
@@ -250,6 +284,14 @@ function paintRoom(ctx: CanvasRenderingContext2D, state: RunState): void {
     ctx.lineTo(demon.x + DEMON_RADIUS + 6, demon.y - 14);
     ctx.lineTo(demon.x + DEMON_RADIUS - 4, demon.y - 10);
     ctx.fill();
+    // Held demons show a shackle tint (spec 05).
+    if (demon.holdTimer > 0) {
+      ctx.strokeStyle = '#9d8fff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(demon.x, demon.y, DEMON_RADIUS + 4, 0, Math.PI * 2);
+      ctx.stroke();
+    }
   }
 
   // Wizard bolts (northbound) and hellfire (southbound).
@@ -280,6 +322,34 @@ function paintRoom(ctx: CanvasRenderingContext2D, state: RunState): void {
   }
 }
 
+/** Mana bar with the Hold cost tick (spec 05). Failed casts flash the
+ * border red while `manaEmptyTimer` runs instead of casting anything. */
+const MANA_BAR = { x: 48, y: 508, w: 220, h: 12 };
+
+function paintManaBar(ctx: CanvasRenderingContext2D, state: RunState): void {
+  const combat = state.combat;
+  if (combat === null) return;
+  const frac = Math.min(1, Math.max(0, combat.wizard.mana / MANA_MAX));
+  ctx.fillStyle = '#241f33';
+  ctx.fillRect(MANA_BAR.x, MANA_BAR.y, MANA_BAR.w, MANA_BAR.h);
+  ctx.fillStyle = '#4d7dd1';
+  ctx.fillRect(MANA_BAR.x, MANA_BAR.y, MANA_BAR.w * frac, MANA_BAR.h);
+  const cost = holdManaCost(combat);
+  if (cost > 0) {
+    const tickX = MANA_BAR.x + (Math.min(1, cost / MANA_MAX) * MANA_BAR.w);
+    ctx.fillStyle = '#e8e0d0';
+    ctx.fillRect(tickX - 1, MANA_BAR.y - 2, 2, MANA_BAR.h + 4);
+  }
+  ctx.strokeStyle = combat.manaEmptyTimer > 0 ? '#e5484d' : '#3a3348';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(MANA_BAR.x, MANA_BAR.y, MANA_BAR.w, MANA_BAR.h);
+  ctx.fillStyle = '#8f86a3';
+  ctx.font = '12px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`MANA ${Math.floor(combat.wizard.mana)}`, MANA_BAR.x, MANA_BAR.y - 9);
+}
+
 function paintRunShell(ctx: CanvasRenderingContext2D, state: RunState, ui: ScaffoldUi): void {
   paintRoom(ctx, state);
 
@@ -303,13 +373,44 @@ function paintRunShell(ctx: CanvasRenderingContext2D, state: RunState, ui: Scaff
   // Pause button (always visible mid-incursion).
   paintButton(ctx, PAUSE_BUTTON, 'II');
 
-  // Spell button (tap = cast, hold = channel). Real mana-cost/cooldown
-  // rendering arrives with items 7/11; the flash proves the input edge.
-  if (ui.spellFlash) {
-    ctx.fillStyle = '#6f5fd0';
+  // Spell button (item 7: tap = cast, hold = channel). Cost label,
+  // cooldown sweep, and a dimmed look when on cooldown, unaffordable, or
+  // with no spell equipped; the press edge draws a violet border.
+  // Full HUD polish (boon icons, lord bar) lands in item 11.
+  const combat = state.combat;
+  let spellLabel = 'Hold —';
+  let cooldownFrac = 0;
+  let spellReady = false;
+  if (combat !== null && combat.holdRank > 0) {
+    const cost = holdManaCost(combat);
+    const total = holdCooldownTotal(combat);
+    const remaining = cooldownRemaining(combat, HOLD.id);
+    cooldownFrac = total > 0 ? Math.min(1, remaining / total) : 0;
+    spellReady = remaining <= 0 && combat.wizard.mana >= cost;
+    spellLabel = `Hold ${Math.round(cost)}`;
+  }
+  paintButton(ctx, SPELL_BUTTON, spellLabel);
+  if (!spellReady) {
+    ctx.fillStyle = 'rgba(10, 8, 16, 0.55)';
     ctx.fillRect(SPELL_BUTTON.x, SPELL_BUTTON.y, SPELL_BUTTON.w, SPELL_BUTTON.h);
   }
-  paintButton(ctx, SPELL_BUTTON, 'Hold');
+  if (cooldownFrac > 0) {
+    const sweepH = SPELL_BUTTON.h * cooldownFrac;
+    ctx.fillStyle = 'rgba(10, 8, 16, 0.65)';
+    ctx.fillRect(
+      SPELL_BUTTON.x,
+      SPELL_BUTTON.y + SPELL_BUTTON.h - sweepH,
+      SPELL_BUTTON.w,
+      sweepH,
+    );
+  }
+  if (ui.spellFlash) {
+    ctx.strokeStyle = '#9d8fff';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(SPELL_BUTTON.x, SPELL_BUTTON.y, SPELL_BUTTON.w, SPELL_BUTTON.h);
+  }
+
+  paintManaBar(ctx, state);
 
   if (state.paused) {
     ctx.fillStyle = 'rgba(10, 8, 16, 0.72)';
