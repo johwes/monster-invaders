@@ -1,6 +1,6 @@
 # AGENTS.md — Wizard's Ward (top-down wizard-vs-demons arcade)
 
-> Greenfield: specs only, no code/tooling yet. Source of truth: `specs/README.md` + `specs/02-06`. On conflict, the numbered spec file wins over the README.
+> Greenfield: specs only, no code/tooling yet. Source of truth: `specs/README.md` + `specs/02-06`. On conflict, the numbered spec file wins over the README. Session entry point: `PROGRESS.md` — always work the topmost unchecked item; spec files change only when behavior/decisions change.
 
 - Planned stack: TypeScript + Vite, plain Canvas 2D, static hosting, no backend, no engine, no binary assets (sprites/synth-SFX drawn/coded). Check for root manifests before adding tooling; keep single-package layout.
 - Naming: specs say `incursion/demon/boon/spell` (legacy `wave/invader/powerup` also appears). Pick one set at scaffolding and use it consistently; suggested layout + `spells.ts` template in `specs/06-tech-architecture.md`.
