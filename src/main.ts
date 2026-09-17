@@ -2,6 +2,8 @@
 // Item 2 wires the run state machine: menu -> incursion -> draft -> … ->
 // gameover, with tactical pause (P/Esc/button, blur auto-pause) freezing
 // demons/projectiles/mana/cooldowns/particles via the loop's isPaused hook.
+// Item 3 adds the normalized input drivers (keyboard + floating-joystick /
+// relative-drag touch, spell/pause buttons, M mute) from game/input.ts.
 
 import './style.css';
 import {
@@ -9,8 +11,10 @@ import {
   REFERENCE_HEIGHT,
   REFERENCE_WIDTH,
 } from './game/constants.ts';
+import { createInput } from './game/input.ts';
 import { createLoop } from './game/loop.ts';
-import { drawScaffoldScreen, hitButtonAt } from './game/render.ts';
+import { drawJoystickOverlay, drawScaffoldScreen, hitButtonAt } from './game/render.ts';
+import { loadMuted, saveMuted } from './game/storage.ts';
 import {
   chooseDraftCard,
   completeIncursion,
@@ -59,20 +63,43 @@ function boot(): void {
   if (ctx === null) return;
 
   const state = createInitialState();
+  const input = createInput();
+  let muted = loadMuted();
+  /** Spell-button press flash (input edge proof until items 7/11). */
+  let spellFlashUntil = 0;
+
+  function toggleMute(): void {
+    muted = !muted;
+    saveMuted(muted);
+  }
 
   const loop = createLoop({
     update(step): void {
-      // Item 2 advances only the run clock; demons/projectiles/mana/
-      // cooldowns/particles arrive in later items and tick here, so the
-      // isPaused freeze below covers them all without rework.
+      // Item 3 advances input smoothing on the fixed clock; demons/
+      // projectiles/mana/cooldowns/particles arrive in later items and tick
+      // here, so the isPaused freeze below covers them all without rework.
+      input.update(step);
+      if (input.consumeSpellPress()) {
+        // No spell effect until item 7 — flash the button to prove the
+        // Q/E/tap edge reached the game through the normalized intent.
+        spellFlashUntil = performance.now() + 160;
+      }
       advanceSim(state, step);
     },
     render(): void {
+      // Movement capture only mid-incursion while unpaused; buttons and
+      // draft/menu input stay live through the state handler below.
+      input.setMoveCaptureEnabled(state.screen === 'incursion' && !state.paused);
       // Re-derive the transform every frame: DPR can change without a
       // resize (e.g. window dragged across monitors).
       const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
       ctx.setTransform(viewScale * dpr, 0, 0, viewScale * dpr, 0, 0);
-      drawScaffoldScreen(ctx, state);
+      drawScaffoldScreen(ctx, state, {
+        touchScheme: input.getTouchScheme(),
+        muted,
+        spellFlash: performance.now() < spellFlashUntil,
+      });
+      drawJoystickOverlay(ctx, input.getJoystick());
     },
     isPaused(): boolean {
       // Full freeze: menu/draft/gameover never tick, and tactical pause
@@ -81,7 +108,7 @@ function boot(): void {
     },
   });
 
-  function handleButton(id: string): void {
+  function handleButton(id: string, pointerId?: number): void {
     switch (id) {
       case 'begin':
       case 'restart':
@@ -95,6 +122,18 @@ function boot(): void {
         break;
       case 'quit-menu':
         quitToMenu(state);
+        break;
+      case 'spell':
+        // Tap edge for the equipped spell (item 7 consumes it); the hold
+        // doubles as the Sunbeam channel while the finger stays down.
+        input.queueSpellPress();
+        if (pointerId !== undefined) input.beginSpellHold(pointerId);
+        break;
+      case 'touch-scheme':
+        input.toggleTouchScheme();
+        break;
+      case 'mute-toggle':
+        toggleMute();
         break;
       case 'draft-0':
         chooseDraftCard(state, 0);
@@ -111,6 +150,12 @@ function boot(): void {
   window.addEventListener('keydown', (event: KeyboardEvent): void => {
     if (event.repeat) return;
     const key = event.key;
+
+    // Global mute (spec 04); persisted via storage.ts for item 11 audio.
+    if (key === 'm' || key === 'M') {
+      toggleMute();
+      return;
+    }
 
     if (state.screen === 'menu') {
       if (key === 'Enter' || key === ' ') {
@@ -167,10 +212,36 @@ function boot(): void {
 
   canvas.addEventListener('pointerdown', (event: PointerEvent): void => {
     event.preventDefault();
+    try {
+      canvas.setPointerCapture(event.pointerId);
+    } catch {
+      // Capture is a drag-continuity nicety; play on without it.
+    }
     const point = toReferenceUnits(canvas, event);
     const hit = hitButtonAt(state, point.x, point.y);
-    if (hit !== null) handleButton(hit);
+    if (hit !== null) {
+      // Buttons win over movement so the stick never swallows taps on
+      // the spell/pause buttons (spec 04/06).
+      handleButton(hit, event.pointerId);
+      return;
+    }
+    if (state.screen === 'incursion' && !state.paused) {
+      input.beginMovePointer(event.pointerId, point.x, point.y);
+    }
   });
+
+  canvas.addEventListener('pointermove', (event: PointerEvent): void => {
+    const point = toReferenceUnits(canvas, event);
+    input.updateMovePointer(event.pointerId, point.x, point.y);
+  });
+
+  function releasePointer(event: PointerEvent): void {
+    input.endMovePointer(event.pointerId);
+    input.endSpellHold(event.pointerId);
+  }
+
+  canvas.addEventListener('pointerup', releasePointer);
+  canvas.addEventListener('pointercancel', releasePointer);
 
   // Auto-pause on blur / tab-hide (spec 04); only mid-incursion matters.
   window.addEventListener('blur', (): void => {
