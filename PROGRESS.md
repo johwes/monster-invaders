@@ -4,7 +4,7 @@ Sessions: read `AGENTS.md` + specs first, then work the **topmost unchecked item
 Check it off when its branch is merged. Update a spec file only if you changed
 locked behavior or a tuning decision — progress logging goes here, not in specs.
 
-- [ ] 0. Scaffold: Vite + TS, `src/` layout per `specs/06-tech-architecture.md`, pick `incursion/demon` vs `wave/invader` naming, record exact `npm install / dev / build / preview` in AGENTS.md.
+- [x] 0. Scaffold: Vite + TS, `src/` layout per `specs/06-tech-architecture.md`, pick `incursion/demon` vs `wave/invader` naming, record exact `npm install / dev / build / preview` in AGENTS.md.
 - [ ] 1. Loop + canvas: fixed-timestep 60 Hz update w/ clamped delta, 960×540 reference units, DPR-capped-at-2 scaling, screen shell (menu/run/gameover placeholders).
 - [ ] 2. Run state machine: menu → incursion → draft → … → gameover; tactical pause (`P`/`Esc`/button, blur auto-pause) freezing demons/projectiles/mana/cooldowns/particles.
 - [ ] 3. Input: normalized `intent { moveX, moveY, casting, beam, spell1 }` abstraction; keyboard (WASD/arrows, Q/E spell, 1/2/3 draft, P/Esc pause, M mute); touch floating joystick (default) + relative-drag fallback, spell/pause buttons.
