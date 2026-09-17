@@ -1,12 +1,9 @@
-// Canvas rendering (spec 05). Room, sprites, HUD, and screens arrive
-// with PROGRESS item 11; this file paints the item-2 screen shells for the
-// run state machine (menu / incursion / draft / gameover + tactical-pause
-// overlay) so transitions and the freeze are verifiable before real art lands.
-// Item 7 adds the functional spell HUD on top: Hold zones + shackle tint,
-// mana bar with cost tick and mana-empty flash, spell button cost label
-// with cooldown sweep. Item 9 adds minimal boon visuals (sunbeam column,
-// skulls, familiars); item 10 adds the demon lord sprite + HP bar; full
-// art polish arrives with item 11.
+// Canvas rendering (spec 05): room, sprites, HUD, screens, and juice.
+// PROGRESS item 11 owns this file's presentation pass: HUD (souls,
+// incursion, ward pips, mana bar with cost tick, spell cooldown sweep,
+// boon icons, lord HP bar, sunbeam heat meter), menu/draft/pause/gameover
+// screens, and juice (shake, hit flash, banish bursts, banners, Hold
+// pulse) with particles capped at ~200 in entities.ts.
 
 import { REFERENCE_WIDTH, REFERENCE_HEIGHT } from './constants.ts';
 import {
@@ -22,16 +19,21 @@ import {
   WARD_LINE_Y,
   WIZARD_RADIUS,
 } from './constants.ts';
-import type { Demon } from './entities.ts';
+import type { CombatState, Demon } from './entities.ts';
 import {
   beamRectForWizard,
   cooldownRemaining,
+  DEFAULT_ARCHETYPE,
   holdCooldownTotal,
   holdManaCost,
+  SHAKE_DURATION,
+  SHAKE_MAGNITUDE,
+  SUNBEAM_COOLDOWNS,
+  SUNBEAM_MAX_ON,
 } from './entities.ts';
 import type { JoystickVisual, TouchScheme } from './input.ts';
 import { HOLD, MANA_MAX } from './spells.ts';
-import type { RunState } from './state.ts';
+import { bannerVisible, type RunState } from './state.ts';
 
 export interface ButtonRect {
   id: string;
@@ -187,13 +189,35 @@ function paintButton(ctx: CanvasRenderingContext2D, button: ButtonRect, label: s
   ctx.fillText(label, button.x + button.w / 2, button.y + button.h / 2);
 }
 
-function paintMenuShell(ctx: CanvasRenderingContext2D, ui: ScaffoldUi): void {
-  paintTitle(
-    ctx,
-    "Wizard's Ward",
-    'menu — placeholder shell',
-    'Enter / Space / Begin: start incursion 1',
+function paintMenuShell(ctx: CanvasRenderingContext2D, state: RunState, ui: ScaffoldUi): void {
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  ctx.fillStyle = '#9d8fff';
+  ctx.font = '56px sans-serif';
+  ctx.fillText("Wizard's Ward", REFERENCE_WIDTH / 2, 120);
+
+  ctx.fillStyle = '#e8e0d0';
+  ctx.font = '20px sans-serif';
+  ctx.fillText(
+    state.highScore > 0 ? `Best: ${state.highScore} souls` : 'No wards held yet — set a best!',
+    REFERENCE_WIDTH / 2,
+    172,
   );
+
+  ctx.fillStyle = '#8f86a3';
+  ctx.font = '15px sans-serif';
+  ctx.fillText('WASD / arrows — move · bolts auto-fire north', REFERENCE_WIDTH / 2, 216);
+  ctx.fillText('Q — Hold spell · P/Esc — pause · M — mute', REFERENCE_WIDTH / 2, 238);
+  ctx.fillText('Touch: thumb-down joystick · tap the spell rune to cast', REFERENCE_WIDTH / 2, 260);
+  ctx.fillStyle = '#5f5878';
+  ctx.font = '13px sans-serif';
+  ctx.fillText(
+    'Hold the ward line. Banish every demon before it crosses.',
+    REFERENCE_WIDTH / 2,
+    288,
+  );
+
   paintButton(ctx, MENU_BEGIN, 'Begin');
   paintButton(
     ctx,
@@ -447,28 +471,96 @@ function paintManaBar(ctx: CanvasRenderingContext2D, state: RunState): void {
   ctx.fillText(`MANA ${Math.floor(combat.wizard.mana)}`, MANA_BAR.x, MANA_BAR.y - 9);
 }
 
-function paintRunShell(ctx: CanvasRenderingContext2D, state: RunState, ui: ScaffoldUi): void {
-  paintRoom(ctx, state);
+/** Juice particles: fading circles over the combatants (spec 05). */
+function paintParticles(ctx: CanvasRenderingContext2D, combat: CombatState): void {
+  for (const p of combat.particles) {
+    const frac = Math.min(1, Math.max(0, p.life / p.maxLife));
+    ctx.save();
+    ctx.globalAlpha = frac;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, Math.max(0.5, p.size * (0.4 + 0.6 * frac)), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
 
+/** Center-screen banner with a wall-clock fade (spec 05 juice). */
+function paintBanner(ctx: CanvasRenderingContext2D, state: RunState): void {
+  const now = performance.now();
+  if (!bannerVisible(state, now)) return;
+  const alpha = Math.min(1, Math.max(0, (state.bannerUntil - now) / 600));
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.font = '30px sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#8f86a3';
-  ctx.font = '16px sans-serif';
+  const w = ctx.measureText(state.bannerText).width + 56;
+  const x = REFERENCE_WIDTH / 2 - w / 2;
+  const y = 92;
+  ctx.fillStyle = 'rgba(10, 8, 16, 0.78)';
+  ctx.fillRect(x, y, w, 52);
+  ctx.strokeStyle = '#9d8fff';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x, y, w, 52);
+  ctx.fillStyle = '#e8e0d0';
+  ctx.fillText(state.bannerText, REFERENCE_WIDTH / 2, y + 27);
+  ctx.restore();
+}
+
+/**
+ * Top HUD (spec 05): souls left, incursion center, best right, ward HP
+ * pips under the souls, demon lord HP bar on lord fights.
+ */
+function paintTopHud(ctx: CanvasRenderingContext2D, state: RunState): void {
+  const combat = state.combat;
+  const best = Math.max(state.highScore, state.score);
+
+  ctx.textBaseline = 'middle';
+  ctx.font = '17px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#e8e0d0';
+  ctx.fillText(`SOULS ${state.score}`, 48, 16);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = combat?.lord !== null ? '#ff9a7a' : '#8f86a3';
   ctx.fillText(
-    `Incursion ${state.incursion} — t=${state.runTime.toFixed(1)}s, souls ${state.score} (best ${Math.max(state.highScore, state.score)})`,
+    combat?.lord !== null
+      ? `INCURSION ${state.incursion} — DEMON LORD`
+      : `INCURSION ${state.incursion}`,
     REFERENCE_WIDTH / 2,
     16,
   );
-  ctx.fillStyle = '#5f5878';
-  ctx.font = '13px sans-serif';
-  ctx.fillText(
-    'Banish every demon before the ward line falls · P/Esc: pause',
-    REFERENCE_WIDTH / 2,
-    REFERENCE_HEIGHT - 12,
-  );
 
-  // Demon lord HP bar (spec 05, item 10): top-center bar on lord fights.
-  const lord = state.combat?.lord ?? null;
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#8f86a3';
+  ctx.fillText(`BEST ${best}`, REFERENCE_WIDTH - 80, 16);
+
+  // Ward HP pips (spec 05): filled hearts of the ward, hollow when spent.
+  if (combat !== null) {
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#5f5878';
+    ctx.font = '11px sans-serif';
+    ctx.fillText('WARD', 48, 40);
+    for (let i = 0; i < combat.wizard.maxHp; i += 1) {
+      const cx = 100 + i * 20;
+      if (i < combat.wizard.hp) {
+        ctx.fillStyle = '#e5484d';
+        ctx.beginPath();
+        ctx.arc(cx, 40, 7, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.strokeStyle = '#5f5878';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(cx, 40, 7, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+  }
+
+  // Demon lord HP bar (spec 05): top-center bar on lord fights.
+  const lord = combat?.lord ?? null;
   if (lord !== null) {
     const barW = 400;
     const barH = 12;
@@ -485,55 +577,185 @@ function paintRunShell(ctx: CanvasRenderingContext2D, state: RunState, ui: Scaff
     ctx.fillStyle = '#e8e0d0';
     ctx.font = '13px sans-serif';
     ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
     ctx.fillText(
       `DEMON LORD — tier ${lord.tier} · ${Math.max(0, lord.hp)}/${lord.maxHp}`,
       REFERENCE_WIDTH / 2,
       barY + barH + 12,
     );
   }
+}
 
-  // Pause button (always visible mid-incursion).
-  paintButton(ctx, PAUSE_BUTTON, 'II');
+/** One icon per boon slot: letter + level pips, dimmed when unowned. */
+function paintBoonIcons(ctx: CanvasRenderingContext2D, combat: CombatState): void {
+  const wardLevel = Math.min(
+    3,
+    Math.max(0, combat.wizard.maxHp - DEFAULT_ARCHETYPE.wardHp),
+  );
+  const icons: { letter: string; level: number; cap: number }[] = [
+    { letter: 'W', level: wardLevel, cap: 3 },
+    { letter: 'A', level: combat.arcaneLevel, cap: 4 },
+    { letter: 'H', level: combat.hasteLevel, cap: 2 },
+    { letter: 'S', level: combat.skullLevel, cap: 3 },
+    { letter: 'B', level: combat.sunbeamLevel, cap: 2 },
+    { letter: 'F', level: combat.familiarLevel, cap: 2 },
+  ];
+  icons.forEach((icon, i) => {
+    const x = 48 + i * 32;
+    const y = 462;
+    const owned = icon.level > 0;
+    ctx.fillStyle = owned ? '#2a2438' : 'rgba(42, 36, 56, 0.45)';
+    ctx.fillRect(x, y, 26, 30);
+    ctx.strokeStyle = owned ? '#6f5fd0' : '#3a3348';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x, y, 26, 30);
+    ctx.fillStyle = owned ? '#e8e0d0' : '#5f5878';
+    ctx.font = '13px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(icon.letter, x + 13, y + 10);
+    for (let p = 0; p < icon.cap; p += 1) {
+      ctx.fillStyle = p < icon.level ? '#9d8fff' : '#3a3348';
+      ctx.beginPath();
+      ctx.arc(x + 6 + p * (icon.cap > 3 ? 4.5 : 6), y + 23, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+}
 
-  // Spell button (item 7: tap = cast, hold = channel). Cost label,
-  // cooldown sweep, and a dimmed look when on cooldown, unaffordable, or
-  // with no spell equipped; the press edge draws a violet border.
-  // Full HUD polish (boon icons) lands in item 11.
-  const combat = state.combat;
-  let spellLabel = 'Hold —';
-  let cooldownFrac = 0;
-  let spellReady = false;
+/**
+ * Sunbeam heat meter (spec 05 HUD): fills while channeling, drains the
+ * forced cooldown after a full burn. Hidden when Sunbeam is unequipped.
+ */
+const BEAM_METER = { x: 280, y: 508, w: 120, h: 12 };
+
+function paintBeamMeter(ctx: CanvasRenderingContext2D, combat: CombatState): void {
+  const level = Math.min(2, Math.max(0, Math.floor(combat.sunbeamLevel)));
+  if (level <= 0) return;
+  const maxOn = SUNBEAM_MAX_ON[level] || 1;
+  const maxCd = SUNBEAM_COOLDOWNS[level] || 1;
+  let frac = 0;
+  let color = '#3fa37a';
+  let label = 'BEAM READY';
+  if (combat.beamActive) {
+    frac = Math.min(1, combat.beamOnTime / maxOn);
+    color = '#e8e0d0';
+    label = 'BEAM…';
+  } else if (combat.beamCooldown > 0) {
+    frac = Math.min(1, combat.beamCooldown / maxCd);
+    color = '#e5484d';
+    label = `BEAM ${combat.beamCooldown.toFixed(1)}s`;
+  }
+  ctx.fillStyle = '#241f33';
+  ctx.fillRect(BEAM_METER.x, BEAM_METER.y, BEAM_METER.w, BEAM_METER.h);
+  ctx.fillStyle = color;
+  ctx.fillRect(BEAM_METER.x, BEAM_METER.y, BEAM_METER.w * frac, BEAM_METER.h);
+  ctx.strokeStyle = '#3a3348';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(BEAM_METER.x, BEAM_METER.y, BEAM_METER.w, BEAM_METER.h);
+  ctx.fillStyle = '#8f86a3';
+  ctx.font = '12px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, BEAM_METER.x, BEAM_METER.y - 9);
+}
+
+/**
+ * Spell button (specs 04/05): dedicated ≥56px rune, tap to cast, hold to
+ * channel Sunbeam. Shows the Hold rank + mana cost, a cooldown sweep, and
+ * a dimmed look when unaffordable, on cooldown, or with no spell equipped.
+ */
+function paintSpellButton(
+  ctx: CanvasRenderingContext2D,
+  combat: CombatState | null,
+  ui: ScaffoldUi,
+): void {
+  const b = SPELL_BUTTON;
+  ctx.fillStyle = '#2a2438';
+  ctx.fillRect(b.x, b.y, b.w, b.h);
+  ctx.strokeStyle = ui.spellFlash ? '#9d8fff' : '#6f5fd0';
+  ctx.lineWidth = ui.spellFlash ? 3 : 2;
+  ctx.strokeRect(b.x, b.y, b.w, b.h);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
   if (combat !== null && combat.holdRank > 0) {
     const cost = holdManaCost(combat);
     const total = holdCooldownTotal(combat);
     const remaining = cooldownRemaining(combat, HOLD.id);
-    cooldownFrac = total > 0 ? Math.min(1, remaining / total) : 0;
-    spellReady = remaining <= 0 && combat.wizard.mana >= cost;
-    spellLabel = `Hold ${Math.round(cost)}`;
+    const frac = total > 0 ? Math.min(1, remaining / total) : 0;
+    const ready = remaining <= 0 && combat.wizard.mana >= cost;
+    ctx.fillStyle = ready ? '#e8e0d0' : '#8f86a3';
+    ctx.font = '15px sans-serif';
+    ctx.fillText(`Hold ${combat.holdRank}`, b.x + b.w / 2, b.y + 20);
+    ctx.fillStyle = '#4d7dd1';
+    ctx.font = '13px sans-serif';
+    ctx.fillText(`${Math.round(cost)} mana`, b.x + b.w / 2, b.y + 42);
+    if (!ready) {
+      ctx.fillStyle = 'rgba(10, 8, 16, 0.55)';
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+    }
+    if (frac > 0) {
+      const sweepH = b.h * frac;
+      ctx.fillStyle = 'rgba(10, 8, 16, 0.65)';
+      ctx.fillRect(b.x, b.y + b.h - sweepH, b.w, sweepH);
+    }
+    return;
   }
-  paintButton(ctx, SPELL_BUTTON, spellLabel);
-  if (!spellReady) {
-    ctx.fillStyle = 'rgba(10, 8, 16, 0.55)';
-    ctx.fillRect(SPELL_BUTTON.x, SPELL_BUTTON.y, SPELL_BUTTON.w, SPELL_BUTTON.h);
+  ctx.fillStyle = '#5f5878';
+  ctx.font = '22px sans-serif';
+  ctx.fillText('—', b.x + b.w / 2, b.y + 20);
+  ctx.font = '11px sans-serif';
+  ctx.fillText('no spell', b.x + b.w / 2, b.y + 42);
+  ctx.fillStyle = 'rgba(10, 8, 16, 0.55)';
+  ctx.fillRect(b.x, b.y, b.w, b.h);
+}
+
+function paintRunShell(ctx: CanvasRenderingContext2D, state: RunState, ui: ScaffoldUi): void {
+  // Screen shake (spec 05 juice): the room kicks under a stable HUD.
+  // The offset is render-only randomness; the sim stays deterministic.
+  ctx.save();
+  const shakeFrac =
+    state.combat !== null && SHAKE_DURATION > 0
+      ? Math.min(1, Math.max(0, state.combat.shakeTimer / SHAKE_DURATION))
+      : 0;
+  if (shakeFrac > 0) {
+    const mag = SHAKE_MAGNITUDE * shakeFrac;
+    ctx.translate((Math.random() * 2 - 1) * mag, (Math.random() * 2 - 1) * mag);
   }
-  if (cooldownFrac > 0) {
-    const sweepH = SPELL_BUTTON.h * cooldownFrac;
-    ctx.fillStyle = 'rgba(10, 8, 16, 0.65)';
-    ctx.fillRect(
-      SPELL_BUTTON.x,
-      SPELL_BUTTON.y + SPELL_BUTTON.h - sweepH,
-      SPELL_BUTTON.w,
-      sweepH,
-    );
-  }
-  if (ui.spellFlash) {
-    ctx.strokeStyle = '#9d8fff';
-    ctx.lineWidth = 3;
-    ctx.strokeRect(SPELL_BUTTON.x, SPELL_BUTTON.y, SPELL_BUTTON.w, SPELL_BUTTON.h);
+  paintRoom(ctx, state);
+  if (state.combat !== null) paintParticles(ctx, state.combat);
+  ctx.restore();
+
+  // Ward-hit flash: a red vignette riding the same shake timer.
+  if (shakeFrac > 0) {
+    ctx.fillStyle = `rgba(229, 72, 77, ${(0.13 * shakeFrac).toFixed(3)})`;
+    ctx.fillRect(0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
   }
 
+  paintTopHud(ctx, state);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#5f5878';
+  ctx.font = '13px sans-serif';
+  ctx.fillText(
+    'Banish every demon before the ward line falls · P/Esc: pause',
+    REFERENCE_WIDTH / 2,
+    REFERENCE_HEIGHT - 12,
+  );
+
+  // Pause button (always visible mid-incursion).
+  paintButton(ctx, PAUSE_BUTTON, 'II');
+
+  paintSpellButton(ctx, state.combat, ui);
+
   paintManaBar(ctx, state);
+  if (state.combat !== null) {
+    paintBeamMeter(ctx, state.combat);
+    paintBoonIcons(ctx, state.combat);
+  }
+
+  paintBanner(ctx, state);
 
   if (state.paused) {
     ctx.fillStyle = 'rgba(10, 8, 16, 0.72)';
@@ -565,8 +787,8 @@ function paintDraftShell(ctx: CanvasRenderingContext2D, state: RunState): void {
   ctx.fillRect(0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
   paintTitle(
     ctx,
-    `Incursion ${state.incursion} clear`,
-    'draft — pick 1 of 3 (no skip, no reroll)',
+    'Draft — pick 1 of 3',
+    'no skip, no reroll · violet borders are spells',
     '1 / 2 / 3 or tap a card → next incursion',
   );
   state.draftOffers.forEach((offer, index) => {
@@ -600,17 +822,46 @@ function paintDraftShell(ctx: CanvasRenderingContext2D, state: RunState): void {
     ctx.font = '14px sans-serif';
     ctx.fillText(offer.delta, card.x + 16, card.y + 70);
   });
+  // The incursion-clear banner rides over the dimmed room (spec 05 juice).
+  paintBanner(ctx, state);
 }
 
 function paintGameoverShell(ctx: CanvasRenderingContext2D, state: RunState): void {
   const best = Math.max(state.highScore, state.score);
-  const badge = state.newBest ? ' — NEW BEST' : '';
-  paintTitle(
-    ctx,
-    'The ward falls…',
-    `gameover — souls ${state.score}, best ${best}${badge}, reached incursion ${state.incursion}`,
-    'Enter: restart · Esc: menu',
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  ctx.fillStyle = '#e8e0d0';
+  ctx.font = '48px sans-serif';
+  ctx.fillText('The ward falls…', REFERENCE_WIDTH / 2, 150);
+
+  ctx.fillStyle = '#e8e0d0';
+  ctx.font = '22px sans-serif';
+  ctx.fillText(`Souls banished: ${state.score}`, REFERENCE_WIDTH / 2, 208);
+
+  ctx.fillStyle = '#8f86a3';
+  ctx.font = '16px sans-serif';
+  ctx.fillText(
+    `Best: ${best} · reached incursion ${state.incursion}`,
+    REFERENCE_WIDTH / 2,
+    238,
   );
+
+  if (state.newBest) {
+    ctx.font = '22px sans-serif';
+    const label = '✦ NEW BEST ✦';
+    const w = ctx.measureText(label).width + 48;
+    const x = REFERENCE_WIDTH / 2 - w / 2;
+    ctx.fillStyle = '#9d8fff';
+    ctx.fillRect(x, 258, w, 44);
+    ctx.fillStyle = '#14101c';
+    ctx.fillText(label, REFERENCE_WIDTH / 2, 281);
+  }
+
+  ctx.fillStyle = '#5f5878';
+  ctx.font = '14px sans-serif';
+  ctx.fillText('Enter: restart · Esc: menu', REFERENCE_WIDTH / 2, 316);
+
   const labels: Record<string, string> = {
     restart: 'Restart',
     'quit-menu': 'Menu',
@@ -628,7 +879,7 @@ export function drawScaffoldScreen(
   paintBackground(ctx);
   switch (state.screen) {
     case 'menu':
-      paintMenuShell(ctx, ui);
+      paintMenuShell(ctx, state, ui);
       break;
     case 'incursion':
       paintRunShell(ctx, state, ui);
@@ -644,14 +895,21 @@ export function drawScaffoldScreen(
 
 /**
  * Code-drawn floating joystick (spec 05): base + knob at the thumb-down
- * point. Drawn only while a joystick drag is active; the idle fade arrives
- * with the item-11 presentation pass.
+ * point, fading out over ~300ms once the thumb lifts ("fading when idle").
+ * The fade is UI-layer wall-clock so it also plays out over the pause
+ * overlay; it never touches the sim.
  */
-export function drawJoystickOverlay(
+const JOYSTICK_FADE_MS = 300;
+let lastStick: JoystickVisual | null = null;
+let lastStickSeen = 0;
+
+function paintStick(
   ctx: CanvasRenderingContext2D,
-  stick: JoystickVisual | null,
+  stick: JoystickVisual,
+  alpha: number,
 ): void {
-  if (stick === null) return;
+  ctx.save();
+  ctx.globalAlpha = alpha;
   ctx.strokeStyle = '#6f5fd0';
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -661,4 +919,23 @@ export function drawJoystickOverlay(
   ctx.beginPath();
   ctx.arc(stick.knobX, stick.knobY, 22, 0, Math.PI * 2);
   ctx.fill();
+  ctx.restore();
+}
+
+export function drawJoystickOverlay(
+  ctx: CanvasRenderingContext2D,
+  stick: JoystickVisual | null,
+): void {
+  const now = performance.now();
+  if (stick !== null) {
+    lastStick = stick;
+    lastStickSeen = now;
+    paintStick(ctx, stick, 1);
+    return;
+  }
+  if (lastStick !== null && now - lastStickSeen < JOYSTICK_FADE_MS) {
+    paintStick(ctx, lastStick, 1 - (now - lastStickSeen) / JOYSTICK_FADE_MS);
+  } else {
+    lastStick = null;
+  }
 }

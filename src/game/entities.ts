@@ -35,6 +35,7 @@ import {
   LORD_RADIUS,
   LORD_SPAWN_Y,
   LORD_SUMMON_CAP,
+  PARTICLE_CAP,
   PILLARS,
   PORTAL_MOUTH,
   ROOM_BOTTOM,
@@ -283,6 +284,29 @@ export interface HoldZone {
 /** How long a failed cast flashes the mana bar (visual `mana-empty` cue). */
 export const MANA_EMPTY_CUE_DURATION = 0.5;
 
+/** Screen shake after a ward hit (seconds; render reads the remainder). */
+export const SHAKE_DURATION = 0.35;
+/** Shake offset at full strength (px, reference units). */
+export const SHAKE_MAGNITUDE = 7;
+
+/**
+ * Juice particle (spec 05): banish bursts, Hold shackle sparks, ward-hit
+ * debris. Pure visuals — no collision. Ticked on the fixed clock inside
+ * `updateCombat`, so tactical pause freezes them with everything else.
+ * Spawn path enforces `PARTICLE_CAP` (~200, spec 05/06).
+ */
+export interface Particle {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  /** Seconds left; render fades the particle as it runs out. */
+  life: number;
+  maxLife: number;
+  size: number;
+  color: string;
+}
+
 export interface CombatState {
   wizard: Wizard;
   demons: Demon[];
@@ -353,6 +377,14 @@ export interface CombatState {
   beamCooldown: number;
   /** Damage-tick accumulator for the live beam. */
   beamTick: number;
+  /** Live juice particles (capped at `PARTICLE_CAP`; oldest yield past it). */
+  particles: Particle[];
+  /**
+   * Seconds of screen shake + red hit-flash left. Set on every landed
+   * ward hit (`damageWizard`); render scales the offset/vignette off the
+   * remainder. Ticks down on the fixed clock (pause freezes it).
+   */
+  shakeTimer: number;
 }
 
 /**
@@ -463,6 +495,8 @@ export function createCombat(
     beamOnTime: 0,
     beamCooldown: 0,
     beamTick: 0,
+    particles: [],
+    shakeTimer: 0,
   };
 }
 
@@ -510,6 +544,60 @@ function syncFamiliars(combat: CombatState): void {
     });
   }
   combat.familiars.length = wanted;
+}
+
+/** Banish-burst tint per demon kind (matches the render palette). */
+const DEMON_BURST_COLORS: Record<DemonKind, string> = {
+  imp: '#b3372e',
+  cackler: '#c26a1b',
+  brute: '#7e1f3d',
+  bat: '#8f86a3',
+};
+
+/**
+ * Spawn a radial juice burst. Past `PARTICLE_CAP` the oldest particles
+ * yield to the fresh ones, so the count never exceeds the cap (spec 05).
+ */
+export function spawnBurst(
+  combat: CombatState,
+  x: number,
+  y: number,
+  color: string,
+  count: number,
+  speed: number,
+  life = 0.5,
+  size = 3,
+): void {
+  for (let i = 0; i < count; i += 1) {
+    if (combat.particles.length >= PARTICLE_CAP) combat.particles.shift();
+    const angle = Math.random() * Math.PI * 2;
+    const v = speed * (0.35 + Math.random() * 0.65);
+    combat.particles.push({
+      x,
+      y,
+      vx: Math.cos(angle) * v,
+      vy: Math.sin(angle) * v,
+      life: life * (0.6 + Math.random() * 0.4),
+      maxLife: life,
+      size: size * (0.7 + Math.random() * 0.6),
+      color,
+    });
+  }
+}
+
+/** Integrate particles on the fixed clock (pause freezes them). */
+function updateParticles(combat: CombatState, step: number): void {
+  const damp = Math.max(0, 1 - 3 * step);
+  const live: Particle[] = [];
+  for (const p of combat.particles) {
+    p.x += p.vx * step;
+    p.y += p.vy * step;
+    p.vx *= damp;
+    p.vy *= damp;
+    p.life -= step;
+    if (p.life > 0) live.push(p);
+  }
+  combat.particles = live;
 }
 
 /** Wizard-owned projectiles in flight (bolts incl. familiar bolts + skulls). */
@@ -587,6 +675,11 @@ export function tryCastHold(combat: CombatState): HoldCastResult {
     combat.zones.shift();
   }
   combat.zones.push(holdZoneForWizard(combat.wizard, rank, combat.holdRank));
+  const zone = combat.zones[combat.zones.length - 1];
+  if (zone !== undefined) {
+    // Shackle sparks where the rune circle lands (spec 05 juice).
+    spawnBurst(combat, zone.x + zone.w / 2, zone.y + zone.h / 2, '#9d8fff', 10, 160, 0.5, 3);
+  }
   return 'cast';
 }
 
@@ -890,6 +983,9 @@ function banishLordIfDead(combat: CombatState): number {
   if (lord === null || lord.hp > 0) return 0;
   combat.lord = null;
   combat.wizard.mana = Math.min(MANA_MAX, combat.wizard.mana + MANA_PER_BANISH);
+  // Lord banish: large ember + bone eruption (spec 05 juice).
+  spawnBurst(combat, lord.x, lord.y, '#ff7a2f', 24, 260, 0.8, 4);
+  spawnBurst(combat, lord.x, lord.y, '#e8e0d0', 16, 180, 0.6, 3);
   return lordSoulsForTier(lord.tier);
 }
 
@@ -938,6 +1034,9 @@ function banishDemon(combat: CombatState, index: number): number {
   const demon = combat.demons[index];
   combat.demons.splice(index, 1);
   combat.wizard.mana = Math.min(MANA_MAX, combat.wizard.mana + MANA_PER_BANISH);
+  // Banish burst: kind-tinted debris + bone-white sparks (spec 05 juice).
+  spawnBurst(combat, demon.x, demon.y, DEMON_BURST_COLORS[demon.kind], 8, 200, 0.5, 3);
+  spawnBurst(combat, demon.x, demon.y, '#e8e0d0', 4, 140, 0.35, 2);
   return demonSoulsForKind(demon.kind);
 }
 
@@ -1231,8 +1330,9 @@ function circlesHit(
 
 /**
  * Deal 1 ward-HP hit to the wizard unless invulnerable or already dead.
- * Sets the 1s blink timer and the incursion's took-hit flag (spec 02).
- * Returns true if the hit landed.
+ * Sets the 1s blink timer and the incursion's took-hit flag (spec 02),
+ * plus the screen shake + hit debris (spec 05 juice). Returns true if the
+ * hit landed.
  */
 function damageWizard(combat: CombatState): boolean {
   const { wizard } = combat;
@@ -1240,6 +1340,8 @@ function damageWizard(combat: CombatState): boolean {
   wizard.hp -= 1;
   wizard.invulnTimer = WIZARD_INVULN_DURATION;
   combat.tookHit = true;
+  combat.shakeTimer = SHAKE_DURATION;
+  spawnBurst(combat, wizard.x, wizard.y, '#e5484d', 12, 220, 0.5, 3);
   return true;
 }
 
@@ -1349,6 +1451,10 @@ export function updateCombat(
   if (combat.wizard.invulnTimer > 0) {
     combat.wizard.invulnTimer = Math.max(0, combat.wizard.invulnTimer - step);
   }
+  if (combat.shakeTimer > 0) {
+    combat.shakeTimer = Math.max(0, combat.shakeTimer - step);
+  }
+  updateParticles(combat, step);
   updateMana(combat, step);
   // One-shot spell edge: Q/E or the spell-button tap (spec 04). Consumed
   // here per fixed step; main.ts delivers it on exactly one step via
