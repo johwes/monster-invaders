@@ -1,7 +1,12 @@
 // Incursion (formation / demon-lord) helpers (spec 02).
-// Composition scaling and spawn logic arrive with PROGRESS items 6 and 10.
+// Normal-incursion composition + difficulty scaling live here; demon-lord
+// spawn logic arrives with PROGRESS item 10.
 
 import type { DemonKind } from './entities.ts';
+import {
+  FORMATION_BASE_FIRE_INTERVAL,
+  FORMATION_BASE_SPEED,
+} from './constants.ts';
 
 /** Every 5th incursion is a demon lord fight (spec 02). */
 export function isLordIncursion(incursion: number): boolean {
@@ -9,26 +14,44 @@ export function isLordIncursion(incursion: number): boolean {
 }
 
 /**
- * Formation size for a normal incursion. Item 4 placeholder: fixed 4 rows
- * x 8 columns (spec 02's starting end of the 4->6 / 8->11 ranges). Item 6
- * expands this to the full scaling composition (cackler i2+, brute i3+,
- * bat i4+).
+ * Formation size for a normal incursion (spec 02: rows 4->6, cols 8->11).
+ * Rows grow every 3rd incursion, columns every 2nd, so the formation caps
+ * at 6x11 from incursion 7 on — endless past that, difficulty continues
+ * through drift/fire-rate scaling below. Tunable.
  */
-export function formationLayout(_incursion: number): { rows: number; cols: number } {
-  return { rows: 4, cols: 8 };
+export function formationLayout(incursion: number): { rows: number; cols: number } {
+  const i = Math.max(1, Math.floor(incursion));
+  return {
+    rows: Math.min(6, 4 + Math.floor((i - 1) / 3)),
+    cols: Math.min(11, 8 + Math.floor((i - 1) / 2)),
+  };
 }
 
 /**
- * Demon kind at a formation cell. Item 4: imps only ("imp first", spec
- * 02 classic grunt equivalent). Item 6 unlocks cackler/brute/bat by
- * incursion number.
+ * Demon kind at a formation cell (row 0 is the north/back rank by the
+ * portal, row `rows - 1` the south/front rank by the wizard). Unlocks per
+ * spec 02: cackler i2+, brute i3+, bat i4+. Brutes hold the front rank,
+ * bats skirmish along the back rank, cacklers fill the middle — anything
+ * still locked (or on incursion 1) is an imp ("imp first").
  */
 export function demonKindAt(
-  _incursion: number,
-  _row: number,
-  _col: number,
+  incursion: number,
+  row: number,
+  col: number,
+  rows: number,
 ): DemonKind {
-  return 'imp';
+  const i = Math.max(1, Math.floor(incursion));
+  if (row === rows - 1) {
+    // Front rank: brutes punch through on even columns (odd stay imps so
+    // the rank is not a full 3-HP wall and imps never vanish entirely).
+    return i >= 3 && col % 2 === 0 ? 'brute' : 'imp';
+  }
+  if (row === 0) {
+    // Back rank: bats skirmish on even columns once they unlock.
+    if (i >= 4) return col % 2 === 0 ? 'bat' : 'cackler';
+    return i >= 2 ? 'cackler' : 'imp';
+  }
+  return i >= 2 ? 'cackler' : 'imp';
 }
 
 /** Base HP per demon kind (spec 02: brute 3, everything else 1). */
@@ -51,6 +74,32 @@ export function demonSoulsForKind(kind: DemonKind): number {
     case 'brute':
       return 50;
   }
+}
+
+/** Horde drift speed: `base * (1 + 0.06 * incursion)` (spec 02). */
+export function driftSpeedForIncursion(incursion: number): number {
+  return FORMATION_BASE_SPEED * (1 + 0.06 * Math.max(1, Math.floor(incursion)));
+}
+
+/**
+ * Classic thin-formation speed-up: the horde sidles faster as it thins,
+ * up to 2x at the last demon. Factor is tunable (spec 02 leaves the exact
+ * curve open).
+ */
+export function thinSpeedMultiplier(alive: number, initial: number): number {
+  if (initial <= 0 || alive >= initial) return 1;
+  return 1 + (1 - Math.max(0, alive) / initial);
+}
+
+/**
+ * Demon fire interval: `max(0.25s, 0.9s - 0.04s * incursion)` (spec 02).
+ * Floors at 0.25s from incursion 17 on.
+ */
+export function fireIntervalForIncursion(incursion: number): number {
+  return Math.max(
+    0.25,
+    FORMATION_BASE_FIRE_INTERVAL - 0.04 * Math.max(1, Math.floor(incursion)),
+  );
 }
 
 /** Incursion-clear bonus: `25 * incursion` (spec 02). */
