@@ -77,12 +77,18 @@ function boot(): void {
       // room combat (wizard, formation, projectiles, pillars) through the
       // same gate, so the isPaused freeze below covers them all.
       input.update(step);
-      if (input.consumeSpellPress()) {
-        // No spell effect until item 7 — flash the button to prove the
-        // Q/E/tap edge reached the game through the normalized intent.
+      // One-shot spell edge (item 7): consume the queued Q/E/tap press and
+      // hand it to the sim on exactly this step's intent. Reading
+      // `getIntent().spell1` after consuming would always be false, and
+      // passing the raw queue through would re-fire across steps.
+      const spellPressed = input.consumeSpellPress();
+      if (spellPressed) {
+        // Button-press flash doubles as the tap-edge proof.
         spellFlashUntil = performance.now() + 160;
       }
-      advanceSim(state, step, input.getIntent());
+      const intent = input.getIntent();
+      intent.spell1 = spellPressed;
+      advanceSim(state, step, intent);
     },
     render(): void {
       // Movement capture only mid-incursion while unpaused; buttons and

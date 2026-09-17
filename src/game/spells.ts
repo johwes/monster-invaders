@@ -1,6 +1,5 @@
-// Spell definitions (specs 02/03/06). Casting, zones, and cooldown
-// timers arrive with PROGRESS item 7; this file locks the data template
-// and the Hold tuning numbers straight from spec 03.
+// Spell definitions (specs 02/03/06). Hold tuning numbers straight from
+// spec 03; casting, zones, and cooldown timers live in entities.ts (item 7).
 
 export interface CostModifiers {
   costMult: number;
@@ -46,6 +45,19 @@ export const HOLD: SpellDef = {
     { cost: 30, cooldown: 10, duration: 4, zoneW: 260, zoneH: 180 },
   ],
 };
+
+/**
+ * Demon lords are never rooted: Hold slows them 50% instead (specs 02/03).
+ * No lord entity exists until item 10; it applies this factor to lord
+ * movement while the lord's center is inside an active zone.
+ */
+export const HOLD_LORD_SLOW = 0.5;
+
+/** 1-based rank def, or null when no spell is equipped (rank 0). */
+export function holdRankDef(rank: number): SpellRank | null {
+  if (!Number.isInteger(rank) || rank < 1 || rank > HOLD.ranks.length) return null;
+  return HOLD.ranks[rank - 1];
+}
 
 /** Effective cost = `base x costMult` (spec 03). */
 export function effectiveCost(base: number, mods: CostModifiers): number {
