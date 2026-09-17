@@ -4,7 +4,8 @@
 // overlay) so transitions and the freeze are verifiable before real art lands.
 // Item 7 adds the functional spell HUD on top: Hold zones + shackle tint,
 // mana bar with cost tick and mana-empty flash, spell button cost label
-// with cooldown sweep.
+// with cooldown sweep. Item 9 adds minimal boon visuals (sunbeam column,
+// skulls, familiars); full art polish arrives with item 11.
 
 import { REFERENCE_WIDTH, REFERENCE_HEIGHT } from './constants.ts';
 import {
@@ -15,11 +16,13 @@ import {
   ROOM_LEFT,
   ROOM_RIGHT,
   ROOM_TOP,
+  SKULL_RADIUS,
   WARD_LINE_Y,
   WIZARD_RADIUS,
 } from './constants.ts';
 import type { Demon } from './entities.ts';
 import {
+  beamRectForWizard,
   cooldownRemaining,
   holdCooldownTotal,
   holdManaCost,
@@ -294,6 +297,19 @@ function paintRoom(ctx: CanvasRenderingContext2D, state: RunState): void {
     }
   }
 
+  // Sunbeam channel (item 9): piercing north column over the wizard.
+  // Translucent so demons inside stay readable; full HUD heat meter in 11.
+  if (combat.beamActive) {
+    const rect = beamRectForWizard(combat.wizard, combat.sunbeamLevel);
+    if (rect !== null) {
+      ctx.fillStyle = 'rgba(232, 224, 208, 0.35)';
+      ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+      ctx.strokeStyle = '#e8e0d0';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+    }
+  }
+
   // Wizard bolts (northbound) and hellfire (southbound).
   for (const bolt of combat.wizardBolts) {
     ctx.fillStyle = '#e8e0d0';
@@ -303,6 +319,36 @@ function paintRoom(ctx: CanvasRenderingContext2D, state: RunState): void {
     ctx.fillStyle = '#ff7a2f';
     ctx.beginPath();
     ctx.arc(bolt.x, bolt.y, BOLT_RADIUS + 1, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Homing skulls (item 9): pale seeking circles with hollow eyes.
+  for (const skull of combat.skulls) {
+    ctx.fillStyle = '#cfc6e8';
+    ctx.beginPath();
+    ctx.arc(skull.x, skull.y, SKULL_RADIUS, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#14101c';
+    ctx.beginPath();
+    ctx.arc(skull.x - 2, skull.y - 1, 1.5, 0, Math.PI * 2);
+    ctx.arc(skull.x + 2, skull.y - 1, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Familiars (item 9): bound imp-drakes flanking the wizard.
+  for (const familiar of combat.familiars) {
+    ctx.fillStyle = '#3fa37a';
+    ctx.beginPath();
+    ctx.arc(familiar.x, familiar.y, 8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#e8e0d0';
+    ctx.beginPath();
+    ctx.moveTo(familiar.x - 8, familiar.y - 2);
+    ctx.lineTo(familiar.x - 13, familiar.y - 8);
+    ctx.lineTo(familiar.x - 5, familiar.y - 7);
+    ctx.moveTo(familiar.x + 8, familiar.y - 2);
+    ctx.lineTo(familiar.x + 13, familiar.y - 8);
+    ctx.lineTo(familiar.x + 5, familiar.y - 7);
     ctx.fill();
   }
 
