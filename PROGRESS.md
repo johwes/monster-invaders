@@ -14,6 +14,6 @@ locked behavior or a tuning decision — progress logging goes here, not in spec
 - [x] 7. Mana + Hold: 100 mana / 8s regen + 2-per-banish, per-spell cooldowns, `costMult`/`cdMult`/`regenMult` hooks, Hold L1/L2 auto-north zone (roots normals, 50% slows lords, re-cast refreshes), `mana-empty` cue.
 - [x] 8. Draft: pause + pick-1-of-3 (Boon/Spell labeled, 1/2/3 keys + tap), stacking caps, Lesser-Heal fallback, delta preview on cards (e.g. "0.35→0.28s").
 - [x] 9. Boon set: Ward, Arcane Power, Haste, Homing Skulls, Sunbeam (suppresses casts/skulls while channeling), Familiar — caps per `specs/03-powerups.md`, wizard-projectile cap ~40.
-- [ ] 10. Demon lord: every 5th incursion, HP `60 + 25 × tier`, 2–3 attack patterns, HP bar, no pillars, 500 × tier souls, advances to draft on banish.
+- [x] 10. Demon lord: every 5th incursion, HP `60 + 25 × tier`, 2–3 attack patterns, HP bar, no pillars, 500 × tier souls, advances to draft on banish.
 - [ ] 11. Presentation + audio: HUD (souls, incursion, pips, mana bar, cooldown sweep, boon icons), menu/draft/pause/gameover screens, juice (shake, flashes, banish bursts, banners; particles ≤ 200), synth SFX + `ww.muted`, audio-resume on gesture.
 - [ ] 12. Acceptance pass: full manual checklist in `specs/06-tech-architecture.md` + one real-device touch check (both touch schemes).
